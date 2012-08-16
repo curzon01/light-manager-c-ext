@@ -1,0 +1,13 @@
+ CC=gcc
+LDFLAGS=-lusb-1.0
+
+all: lightmanager
+
+lightmanager: lightmanager.c
+	$(CC) lightmanager.c $(CFLAGS) $(LDFLAGS) -olightmanager
+
+clean:
+	rm -f *.o *~ *.so *.out lightmanager
+
+
+
