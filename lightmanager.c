@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 1.2.0004
+ Version     : 1.2.0009
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -36,7 +36,11 @@
 			+ WAIT command implemented
 
 	1.02.0008
-			* Output to syslog optional using -s (default stdout)
+			* Output default stdout, optional to syslog using cmd parameter -s
+
+	1.02.0009
+			+ multiple commands also possible on TCP connection command line (as it still works for -c parameter)
+			+ New command GET/SET HOUSECODE (get/set FS20 housecode on command line)
 */
 
 #include <stdio.h>
@@ -59,34 +63,38 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"1.2.0008"
+#define VERSION				"1.2.0009"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
 #define exit_if(expr) \
 if(expr) { \
-  debug(LOG_DEBUG, "exit_if() %s: %d: %s: Error %s", __FILE__, __LINE__, __PRETTY_FUNCTION__, strerror(errno)); \
+  debug(LOG_DEBUG, "%s: %d: %s: Error - %s", __FILE__, __LINE__, __PRETTY_FUNCTION__, strerror(errno)); \
   exit(1); \
 }
 #define return_if(expr, retvalue) \
 if(expr) { \
-  debug(LOG_DEBUG, "return_if() %s: %d: %s: Error %s", __FILE__, __LINE__, __PRETTY_FUNCTION__, strerror(errno)); \
+  debug(LOG_DEBUG, "%s: %d: %s: Error - %s", __FILE__, __LINE__, __PRETTY_FUNCTION__, strerror(errno)); \
   return(retvalue); \
 }
 
 
-#define LM_VENDOR_ID		0x16c0	/* jbmedia Light-Manager (Pro) USB vendor */
-#define LM_PRODUCT_ID		0x0a32	/* jbmedia Light-Manager (Pro) USB product ID */
+#define LM_VENDOR_ID		0x16c0		/* jbmedia Light-Manager (Pro) USB vendor */
+#define LM_PRODUCT_ID		0x0a32		/* jbmedia Light-Manager (Pro) USB product ID */
 
-#define USB_MAX_RETRY		5		/* max number of retries on usb error */
-#define USB_TIMEOUT			250		/* timeout in ms for usb transfer */
-#define USB_WAIT_ON_ERROR	250		/* delay between unsuccessful usb retries */
+#define USB_MAX_RETRY		5			/* max number of retries on usb error */
+#define USB_TIMEOUT			250			/* timeout in ms for usb transfer */
+#define USB_WAIT_ON_ERROR	250			/* delay between unsuccessful usb retries */
 
-#define INPUT_BUFFER_MAXLEN	1024	/* TCP commmand string buffer size */
-#define MSG_BUFFER_MAXLEN	2048	/* TCP return message string buffer size */
+#define INPUT_BUFFER_MAXLEN	1024		/* TCP commmand string buffer size */
+#define MSG_BUFFER_MAXLEN	2048		/* TCP return message string buffer size */
+
+#define CMD_DELIMITER		",;"		/* Command line command delimiter can be ; or , */
+#define MAX_CMDS			500			/* Max number of commands per command line */
+#define TOKEN_DELIMITER 	" ,;\t\v\f" /* Command line token delimiter */
 
 
-/* command line parameter defaults */
+/* program parameter defaults */
 #define DEF_DAEMON		false
 #define DEF_DEBUG		false
 #define DEF_SYSLOG		false
@@ -94,19 +102,21 @@ if(expr) { \
 #define DEF_HOUSECODE	0x0000
 
 
+
 /* ======================================================================== */
 /* Global vars */
 /* ======================================================================== */
-/* command line parameter variables */
+/* program parameter variables */
 bool fDaemon	= DEF_DAEMON;
 bool fDebug		= DEF_DEBUG;
 bool fsyslog	= DEF_SYSLOG;
 unsigned int port = DEF_PORT;
 unsigned int housecode = DEF_HOUSECODE;
 
-
+/* TCP */
 fd_set socks;
 
+/* Resources */
 pthread_mutex_t mutex_socks = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_usb   = PTHREAD_MUTEX_INITIALIZER;
 
@@ -114,11 +124,13 @@ libusb_device_handle *dev_handle;
 libusb_context *usbContext;
 
 
+
 /* ======================================================================== */
 /* Prototypes */
 /* ======================================================================== */
 /* Non-ANSI stdlib functions */
-int strnicmp(const char * cs,const char * ct,size_t count);
+int stricmp(const char *s1, const char *s2);
+int strnicmp(const char *s1, const char *s2, size_t n);
 char *itoa(int value, char* result, int base);
 char *ltrim(char *const s);
 char *rtrim(char *const s);
@@ -152,22 +164,33 @@ void copyright(void);
 void usage(void);
 
 
-
-
 /* ======================================================================== */
 /* Non-ANSI stdlib functions */
 /* ======================================================================== */
-int strnicmp(const char * cs,const char * ct,size_t count)
+int stricmp(const char *s1, const char *s2)
 {
-	register signed char __res = 0;
+  char f, l;
 
-	while (count) {
-		if ((__res = toupper( *cs ) - toupper( *ct++ ) ) != 0 || !*cs++)
-			break;
-		count--;
-	}
+  do {
+    f = ((*s1 <= 'Z') && (*s1 >= 'A')) ? *s1 + 'a' - 'A' : *s1;
+    l = ((*s2 <= 'Z') && (*s2 >= 'A')) ? *s2 + 'a' - 'A' : *s2;
+    s1++;
+    s2++;
+  } while ((f) && (f == l));
 
-	return __res;
+  return (int) (f - l);
+}
+
+int strnicmp(const char *s1, const char *s2, size_t n)
+{
+  int f, l;
+
+  do {
+    if (((f = (unsigned char)(*(s1++))) >= 'A') && (f <= 'Z')) f -= 'A' - 'a';
+    if (((l = (unsigned char)(*(s2++))) >= 'A') && (l <= 'Z')) l -= 'A' - 'a';
+  } while (--n && f && (f == l));
+
+  return f - l;
 }
 
 
@@ -293,7 +316,7 @@ int fs20toi(char *fs20, char **endptr)
 const char *itofs20(char *buf, int code, char *separator)
 {
 	int strpos = 0;
-	int shift = (code>0xff)?12:4;
+	int shift = (code>0xff)?12:12;
 
 	while( shift>=0 ) {
 		if( ((code>>shift) & 0x0f) < 4 ) {
@@ -446,6 +469,7 @@ void debug(int priority, const char *format, ...)
 			}
 			else {
 				vfprintf(stdout, format, args);
+				fputs("\n", stdout);
 			}
 		}
 	}
@@ -455,6 +479,7 @@ void debug(int priority, const char *format, ...)
 		}
 		else {
 			vfprintf(stdout, format, args);
+			fputs("\n", stdout);
 		}
 	}
 	va_end(args);
@@ -517,36 +542,48 @@ void client_cmd_help(int socket_handle)
 {
 	write_to_client(socket_handle,
 					 	"\r\n"
-					 	"%s (%s) command list\r\n"
+					 	"%s (%s) help\r\n"
+						"\r\n"
+						"Light Manager commands\r\n"
+						"    GET CLOCK         Read the current device date and time\r\n"
+						"    GET HOUSECODE     Read the current FS20 housecode\r\n"
+						"    GET TEMP          Read the current device temperature sensor\r\n"
+						"    SET HOUSECODE hc  Set the FS20 housecode where\r\n"
+						"                        adr  FS20 housecode, format xxxxxxxx (11111111-44444444)\r\n"
+						"    SET CLOCK [time]  Set the device clock to system time or to <time>\r\n"
+						"                      where time format is MMDDhhmm[[CC]YY][.ss]\r\n"
+						"\r\n"
+						"Device commands\r\n"
 						"    FS20 addr cmd     Send a FS20 command where\r\n"
 						"                        adr  FS20 address using the format ggss (1111-4444)\r\n"
 						"                        cmd  Command ON|OFF|TOGGLE|UP|+|DOWN|-|<dim>\r\n"
 						"                             where <dim> is the dim level\r\n"
 						"                             * absolute values:   0 (min=off) to 16 (max))\r\n"
 						"                             * percentage values: O\% to 100\%)\r\n"
-						"    UNIROLL addr cmd  Send an Uniroll command where\r\n"
-						"                        adr  Uniroll jalousie number (1-100)\r\n"
-						"                        cmd  Command UP|+|DOWN|-|STOP\r\n"
 						"    IT code addr cmd    Send an InterTechno command where\r\n"
 						"                        code  InterTechno housecode (A-P)\r\n"
 						"                        addr  InterTechno channel (1-16)\r\n"
 						"                        cmd   Command ON|OFF|TOGGLE\r\n"
+						"    UNIROLL addr cmd  Send an Uniroll command where\r\n"
+						"                        adr  Uniroll jalousie number (1-100)\r\n"
+						"                        cmd  Command UP|+|DOWN|-|STOP\r\n"
 						"    SCENE scn         Activate scene <scn> (1-254)\r\n"
-						"    GET CLOCK         Get the current device date and time\r\n"
-						"    GET TEMP          Get the current device temperature sensor\r\n"
-						"    SET CLOCK [time]  Set the device clock to system time or to <time>\r\n"
-						"                      where time format is MMDDhhmm[[CC]YY][.ss]\r\n"
-						"    WAIT ms           Wait for <ms> milliseconds\r\n"
-						"    QUIT              Disconnect\r\n"
+						"\r\n"
+						"System commands\r\n"
+						"    ? or HELP         Prints this help\r\n"
 						"    EXIT              Disconnect and exit server programm\r\n"
+						"    QUIT              Disconnect\r\n"
+						"    WAIT ms           Wait for <ms> milliseconds\r\n"
 					, PROGNAME, VERSION);
 }
 
 
 int cmdcompare(const char * cs, const char * ct)
 {
-	return strnicmp(cs, ct, strlen(ct));
+	/* return strnicmp(cs, ct, strlen(ct)); */
+	return stricmp(cs, ct);
 }
+
 
 /* 	handle command input either via TCP socket or by a given string.
 	if socket_handle is 0, then results will be given via stdout
@@ -555,375 +592,433 @@ int cmdcompare(const char * cs, const char * ct)
 int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle)
 {
 	static char usbcmd[8];
-	char delimiter[] = " ,;\t\v\f";
+	char cmd_delimiter[] = CMD_DELIMITER;
+	char *cmds[MAX_CMDS];
+
+	char tok_delimiter[] = TOKEN_DELIMITER;
+	int i;
 	char *ptr;
+	bool fcmdok = true;
 
-	debug(LOG_DEBUG, "Handle input string '%s'", input);
 
-	memset(usbcmd, 0, sizeof(usbcmd));
+	debug(LOG_DEBUG, "Handle input '%s'", input);
 
-	ptr = strtok(input, delimiter);
+	i = 0;
+	cmds[i] = strtok(input, cmd_delimiter);
+	while( i<MAX_CMDS && cmds[i]!=NULL ) {
+		cmds[++i] = strtok(NULL, cmd_delimiter);
+	}
+	i = 0;
+	while( i<MAX_CMDS && cmds[i]!=NULL ) {
+		char *command = cmds[i++];
 
-	if( ptr != NULL ) {
-		if (cmdcompare(input, "H") == 0 || cmdcompare(input, "?") == 0) {
-			client_cmd_help(socket_handle);
-			return 0;
-		}
-		/* FS20 devices */
-		else if (cmdcompare(input, "FS20") == 0) {
-			char *cp;
-			int addr;
-			int cmd = -1;
+		debug(LOG_DEBUG, "Handle cmd '%s'", command);
+		memset(usbcmd, 0, sizeof(usbcmd));
 
-			/* next token: addr */
-	 		ptr = strtok(NULL, delimiter);
-	 		if( ptr!=NULL ) {
-				int addr = fs20toi(ptr, &cp);
-				if ( addr > 0 ) {
-					/* next token: cmd */
-			 		ptr = strtok(NULL, delimiter);
-			 		if( ptr!=NULL ) {
-						if (cmdcompare(ptr, "ON") == 0) {
-							cmd = 0x11;
-						} else if (cmdcompare(ptr, "OFF") == 0) {
-							cmd = 0x00;
-						} else if (cmdcompare(ptr, "TOGGLE") == 0) {
-							cmd = 0x12;
-						} else if (cmdcompare(ptr, "UP") == 0 || cmdcompare(ptr, "+") == 0 ) {
-							cmd = 0x13;
-						} else if (cmdcompare(ptr, "DOWN") == 0 || cmdcompare(ptr, "-") == 0 ) {
-							cmd = 0x14;
-						}
-						/* dimming case */
-						else {
-							errno = 0;
-							int dim_value = strtol(ptr, NULL, 10);
-							if( *(ptr+strlen(ptr)-1)=='\%' ) {
-								dim_value = (16 * dim_value) / 100;
+		ptr = strtok(command, tok_delimiter);
+
+		if( ptr != NULL ) {
+			if (cmdcompare(ptr, "H") == 0 || cmdcompare(ptr, "?") == 0) {
+				client_cmd_help(socket_handle);
+				return 0;
+			}
+			/* FS20 devices */
+			else if (cmdcompare(ptr, "FS20") == 0) {
+				char *cp;
+				int addr;
+				int cmd = -1;
+
+				/* next token: addr */
+		 		ptr = strtok(NULL, tok_delimiter);
+		 		if( ptr!=NULL ) {
+					int addr = fs20toi(ptr, &cp);
+					if ( addr > 0 ) {
+						/* next token: cmd */
+				 		ptr = strtok(NULL, tok_delimiter);
+				 		if( ptr!=NULL ) {
+							if (cmdcompare(ptr, "ON") == 0) {
+								cmd = 0x11;
+							} else if (cmdcompare(ptr, "OFF") == 0) {
+								cmd = 0x00;
+							} else if (cmdcompare(ptr, "TOGGLE") == 0) {
+								cmd = 0x12;
+							} else if (cmdcompare(ptr, "UP") == 0 || cmdcompare(ptr, "+") == 0 ) {
+								cmd = 0x13;
+							} else if (cmdcompare(ptr, "DOWN") == 0 || cmdcompare(ptr, "-") == 0 ) {
+								cmd = 0x14;
 							}
-							if (errno != 0 || dim_value < 0 || dim_value > 16) {
-								cmd = -2;
-								write_to_client(socket_handle, "FS20: Wrong dim level (must be within 0-16 or 0\%-100\%)\r\n");
-							}
+							/* dimming case */
 							else {
-								cmd = 0x01 * dim_value;
-							}
-						}
-						if (cmd >= 0) {
-							usbcmd[0] = 0x01;
-							usbcmd[1] = (unsigned char) (housecode >> 8);   /* Housecode high byte */
-							usbcmd[2] = (unsigned char) (housecode & 0xff); /* Housecode low byte */
-							usbcmd[3] = addr;
-							usbcmd[4] = cmd;
-							usbcmd[6] = 0x03;
-							if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-								write_to_client(socket_handle, "USB communication error\r\n");
-							}
-							else {
-								write_to_client(socket_handle, "OK\r\n");
-							}
-						}
-						else if (cmd == -1 ) {
-							write_to_client(socket_handle, "FS20: unknown <cmd> parameter '%s'\r\n", ptr);
-						}
-					}
-					else {
-						write_to_client(socket_handle, "FS20: missing <cmd> parameter\r\n");
-					}
-				}
-				else {
-					write_to_client(socket_handle, "FS20 %s: wrong <addr> parameter\r\n", ptr);
-				}
-			}
-			else {
-				write_to_client(socket_handle, "FS20: missing <addr> parameter\r\n");
-			}
-	 	}
-		/* Uniroll devices */
-		else if (cmdcompare(input, "UNI") == 0) {
-			int addr;
-			int cmd = -1;
-
-			/* next token: addr */
-	 		ptr = strtok(NULL, delimiter);
-	 		if( ptr!=NULL ) {
-				errno = 0;
-				int addr = strtol(ptr, NULL, 10);
-				if (errno == 0 && addr >=1 && addr <= 16) {
-					/* next token: cmd */
-			 		ptr = strtok(NULL, delimiter);
-			 		if( ptr!=NULL ) {
-						if (cmdcompare(ptr, "STOP") == 0) {
-							cmd = 0x02;
-						} else if (cmdcompare(ptr, "UP") == 0 || cmdcompare(ptr, "+") == 0 ) {
-							cmd = 0x01;
-						} else if (cmdcompare(ptr, "DOWN") == 0 || cmdcompare(ptr, "-") == 0 ) {
-							cmd = 0x04;
-						}
-						if (cmd >= 0) {
-							/* 15 jj 74 cc 00 00 00 00 */
-							usbcmd[0] = 0x15;
-							usbcmd[1] = addr-1;
-							usbcmd[2] = 0x74;
-							usbcmd[3] = cmd;
-							if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-								write_to_client(socket_handle, "USB communication error\r\n");
-							}
-							else {
-								write_to_client(socket_handle, "OK\r\n");
-							}
-						}
-						else {
-							write_to_client(socket_handle, "UNIROLL: wrong <cmd> parameter '%s'\r\n", ptr);
-						}
-					}
-					else {
-						write_to_client(socket_handle, "UNIROLL: missing <cmd> parameter\r\n");
-					}
-				}
-				else {
-					write_to_client(socket_handle, "UNIROLL %s: wrong <addr> parameter\r\n", ptr);
-				}
-			}
-			else {
-				write_to_client(socket_handle, "UNIROLL: missing <addr> parameter\r\n");
-			}
-	 	}
-		/* InterTechno devices */
-		else if (cmdcompare(input, "IT") == 0 || cmdcompare(input, "InterTechno") == 0) {
-			int code;
-			int addr;
-			int cmd = -1;
-
-			/* next token: code */
-	 		ptr = strtok(NULL, delimiter);
-	 		if( ptr!=NULL ) {
-	 			if( toupper(*ptr)>='A' && toupper(*ptr)<='Z' ) {
-	 				code = toupper(*ptr) - 'A';
-					/* next token: addr */
-			 		ptr = strtok(NULL, delimiter);
-			 		if( ptr!=NULL ) {
-						errno = 0;
-						int addr = strtol(ptr, NULL, 10);
-						if (errno == 0 && addr >=1 && addr <= 16) {
-							/* next token: cmd */
-					 		ptr = strtok(NULL, delimiter);
-					 		if( ptr!=NULL ) {
-								if (cmdcompare(ptr, "ON") == 0) {
-									cmd = 0x01;
-								} else if (cmdcompare(ptr, "OFF") == 0 ) {
-									cmd = 0x00;
-								} else if (cmdcompare(ptr, "TOGGLE") == 0 ) {
-									cmd = 0x02;
+								errno = 0;
+								int dim_value = strtol(ptr, NULL, 10);
+								if( *(ptr+strlen(ptr)-1)=='\%' ) {
+									dim_value = (16 * dim_value) / 100;
 								}
-								if (cmd >= 0) {
-									usbcmd[0] = 0x05;
-									usbcmd[1] = code * 0x10 + (addr - 1);
-									usbcmd[2] = cmd;
-									usbcmd[3] = 0x06;
-									if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-										write_to_client(socket_handle, "USB communication error\r\n");
+								if (errno != 0 || dim_value < 0 || dim_value > 16) {
+									cmd = -2;
+									write_to_client(socket_handle, "FS20: Wrong dim level (must be within 0-16 or 0\%-100\%)\r\n");
+									fcmdok = false;
+								}
+								else {
+									cmd = 0x01 * dim_value;
+								}
+							}
+							if (cmd >= 0) {
+								usbcmd[0] = 0x01;
+								usbcmd[1] = (unsigned char) (housecode >> 8);   /* Housecode high byte */
+								usbcmd[2] = (unsigned char) (housecode & 0xff); /* Housecode low byte */
+								usbcmd[3] = addr;
+								usbcmd[4] = cmd;
+								usbcmd[6] = 0x03;
+								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+									write_to_client(socket_handle, "USB communication error\r\n");
+									fcmdok = false;
+								}
+							}
+							else if (cmd == -1 ) {
+								write_to_client(socket_handle, "FS20: unknown <cmd> parameter '%s'\r\n", ptr);
+								fcmdok = false;
+							}
+						}
+						else {
+							write_to_client(socket_handle, "FS20: missing <cmd> parameter\r\n");
+							fcmdok = false;
+						}
+					}
+					else {
+						write_to_client(socket_handle, "FS20 %s: wrong <addr> parameter\r\n", ptr);
+						fcmdok = false;
+					}
+				}
+				else {
+					write_to_client(socket_handle, "FS20: missing <addr> parameter\r\n");
+					fcmdok = false;
+				}
+		 	}
+			/* Uniroll devices */
+			else if (cmdcompare(ptr, "UNI") == 0) {
+				int addr;
+				int cmd = -1;
+
+				/* next token: addr */
+		 		ptr = strtok(NULL, tok_delimiter);
+		 		if( ptr!=NULL ) {
+					errno = 0;
+					int addr = strtol(ptr, NULL, 10);
+					if (errno == 0 && addr >=1 && addr <= 16) {
+						/* next token: cmd */
+				 		ptr = strtok(NULL, tok_delimiter);
+				 		if( ptr!=NULL ) {
+							if (cmdcompare(ptr, "STOP") == 0) {
+								cmd = 0x02;
+							} else if (cmdcompare(ptr, "UP") == 0 || cmdcompare(ptr, "+") == 0 ) {
+								cmd = 0x01;
+							} else if (cmdcompare(ptr, "DOWN") == 0 || cmdcompare(ptr, "-") == 0 ) {
+								cmd = 0x04;
+							}
+							if (cmd >= 0) {
+								/* 15 jj 74 cc 00 00 00 00 */
+								usbcmd[0] = 0x15;
+								usbcmd[1] = addr-1;
+								usbcmd[2] = 0x74;
+								usbcmd[3] = cmd;
+								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+									write_to_client(socket_handle, "USB communication error\r\n");
+									fcmdok = false;
+								}
+							}
+							else {
+								write_to_client(socket_handle, "UNIROLL: wrong <cmd> parameter '%s'\r\n", ptr);
+								fcmdok = false;
+							}
+						}
+						else {
+							write_to_client(socket_handle, "UNIROLL: missing <cmd> parameter\r\n");
+							fcmdok = false;
+						}
+					}
+					else {
+						write_to_client(socket_handle, "UNIROLL %s: wrong <addr> parameter\r\n", ptr);
+						fcmdok = false;
+					}
+				}
+				else {
+					write_to_client(socket_handle, "UNIROLL: missing <addr> parameter\r\n");
+					fcmdok = false;
+				}
+		 	}
+			/* InterTechno devices */
+			else if (cmdcompare(ptr, "IT") == 0 || cmdcompare(ptr, "InterTechno") == 0) {
+				int code;
+				int addr;
+				int cmd = -1;
+
+				/* next token: code */
+		 		ptr = strtok(NULL, tok_delimiter);
+		 		if( ptr!=NULL ) {
+		 			if( toupper(*ptr)>='A' && toupper(*ptr)<='Z' ) {
+		 				code = toupper(*ptr) - 'A';
+						/* next token: addr */
+				 		ptr = strtok(NULL, tok_delimiter);
+				 		if( ptr!=NULL ) {
+							errno = 0;
+							int addr = strtol(ptr, NULL, 10);
+							if (errno == 0 && addr >=1 && addr <= 16) {
+								/* next token: cmd */
+						 		ptr = strtok(NULL, tok_delimiter);
+						 		if( ptr!=NULL ) {
+									if (cmdcompare(ptr, "ON") == 0) {
+										cmd = 0x01;
+									} else if (cmdcompare(ptr, "OFF") == 0 ) {
+										cmd = 0x00;
+									} else if (cmdcompare(ptr, "TOGGLE") == 0 ) {
+										cmd = 0x02;
+									}
+									if (cmd >= 0) {
+										usbcmd[0] = 0x05;
+										usbcmd[1] = code * 0x10 + (addr - 1);
+										usbcmd[2] = cmd;
+										usbcmd[3] = 0x06;
+										if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+											write_to_client(socket_handle, "USB communication error\r\n");
+											fcmdok = false;
+										}
 									}
 									else {
-										write_to_client(socket_handle, "OK\r\n");
+										write_to_client(socket_handle, "InterTechno: wrong <cmd> parameter '%s'\r\n", ptr);
+										fcmdok = false;
 									}
 								}
 								else {
-									write_to_client(socket_handle, "InterTechno: wrong <cmd> parameter '%s'\r\n", ptr);
+									write_to_client(socket_handle, "InterTechno: missing <cmd> parameter\r\n");
+									fcmdok = false;
 								}
 							}
 							else {
-								write_to_client(socket_handle, "InterTechno: missing <cmd> parameter\r\n");
+								write_to_client(socket_handle, "InterTechno: %s: <addr> parameter out of range (must be within 1 to 16)\r\n", ptr);
+								fcmdok = false;
 							}
 						}
 						else {
-							write_to_client(socket_handle, "InterTechno: %s: <addr> parameter out of range (must be within 1 to 16)\r\n", ptr);
+							write_to_client(socket_handle, "InterTechno: missing <addr> parameter\r\n");
+							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, "InterTechno: missing <addr> parameter\r\n");
+						write_to_client(socket_handle, "InterTechno: <code> parameter out of range (must be within 'A' to 'P')\r\n");
+						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, "InterTechno: <code> parameter out of range (must be within 'A' to 'P')\r\n");
+					write_to_client(socket_handle, "InterTechno: missing <code> parameter\r\n");
+					fcmdok = false;
 				}
-			}
-			else {
-				write_to_client(socket_handle, "InterTechno: missing <code> parameter\r\n");
-			}
-	 	}
-	 	/* Scene commands */
-		else if (cmdcompare(input, "SCENE") == 0) {
-			long int scene;
+		 	}
+		 	/* Scene commands */
+			else if (cmdcompare(ptr, "SCENE") == 0) {
+				long int scene;
 
-	 		ptr = strtok(NULL, delimiter);
-			if( ptr != NULL ) {
-				scene = strtol(ptr, NULL, 10);
-				if( scene >= 1 && scene<=254 ) {
-					usbcmd[0] = 0x0f;
-					usbcmd[1] = 0x01 * scene;
-					if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-						write_to_client(socket_handle, "USB communication error\r\n");
-					}
-					else {
-						write_to_client(socket_handle, "OK\r\n");
-					}
-				}
-				else {
-					write_to_client(socket_handle, "SCENE: parameter <s> out of range (must be within range 1-254)\r\n");
-				}
-			}
-			else {
-				write_to_client(socket_handle, "SCENE: missing parameter\r\n");
-			}
-	 	}
-	 	/* Get commands */
-		else if (cmdcompare(input, "GET") == 0) {
-			/* next token GET device */
-	 		ptr = strtok(NULL, delimiter);
-	 		if( ptr!=NULL ) {
-				if (cmdcompare(ptr, "CLOCK") == 0 ||
-					cmdcompare(ptr, "TIME") == 0) {
-					struct tm timeinfo;
-
-					usbcmd[0] = 0x09;
-					if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
-						write_to_client(socket_handle, "USB communication error\r\n");
-					}
-					/* ss mm hh dd MM ww yy 00 */
-					timeinfo.tm_sec  = usbcmd[0];
-					timeinfo.tm_min  = usbcmd[1];
-					timeinfo.tm_hour = usbcmd[2];
-					timeinfo.tm_mday = usbcmd[3];
-					timeinfo.tm_mon  = usbcmd[4]-1;
-					timeinfo.tm_year = usbcmd[6] + 100;
-					mktime ( &timeinfo );
-					write_to_client(socket_handle, "%s\r", asctime(&timeinfo) );
-
-				} else if (cmdcompare(ptr, "TEMP") == 0 ) {
-					usbcmd[0] = 0x0c;
-					if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
-						write_to_client(socket_handle, "USB communication error\r\n");
-					}
-					else if( usbcmd[0]==0xfd ) {
-						write_to_client(socket_handle, "%.1f degree Celsius\r\n", (float)usbcmd[1]/2);
-					}
-				}
-				else {
-					write_to_client(socket_handle, "GET: unknown parameter '%s'\r\n", ptr);
-				}
-			}
-			else {
-				write_to_client(socket_handle, "GET: missing parameter\r\n");
-			}
-	 	}
-	 	/* Set commands */
-		else if (cmdcompare(input, "SET") == 0) {
-	 		ptr = strtok(NULL, delimiter);
-	 		/* next token SET device */
-	 		if( ptr!=NULL ) {
-				if (cmdcompare(ptr, "CLOCK") == 0 ||
-					cmdcompare(ptr, "TIME") == 0) {
-					int cmd = 8;
-				  	time_t now;
-				  	struct tm * currenttime;
-					struct tm timeinfo;
-
-			        time(&now);
-			        currenttime = localtime(&now);
-			        memcpy(&timeinfo, currenttime, sizeof(timeinfo));
-
-			        /* next token new time (optional) */
-			 		ptr = strtok(NULL, delimiter);
-			 		if( ptr!=NULL ) {
-						switch( strlen(ptr) ) {
-							case 8:		/* MMDDhhmm */
-						        strptime(ptr, "%m%d%H%M", &timeinfo);
-								break;
-							case 10:	/* MMDDhhmmYY */
-						        strptime(ptr, "%m%d%H%M%y", &timeinfo);
-								break;
-							case 11:	/* MMDDhhmm.ss */
-						        strptime(ptr, "%m%d%H%M.%S", &timeinfo);
-								break;
-							case 12:	/* MMDDhhmmCCYY */
-						        strptime(ptr, "%m%d%H%M%Y", &timeinfo);
-								break;
-							case 13:	/* MMDDhhmmYY.ss */
-						        strptime(ptr, "%m%d%H%M%y.%S", &timeinfo);
-								break;
-							case 15:	/* MMDDhhmmCCYY.ss */
-						        strptime(ptr, "%m%d%H%M%Y.%S", &timeinfo);
-								break;
-							default:
-								write_to_client(socket_handle, "SET CLOCK: wrong time format (use MMDDhhmm[[CC]YY][.ss])\r\n");
-								cmd = -1;
-								break;
-						}
-			 		}
-			 		if( cmd != -1 ) {
-			 			int i;
-						usbcmd[0] = cmd;
-						usbcmd[1] = timeinfo.tm_sec;
-						usbcmd[2] = timeinfo.tm_min;
-						usbcmd[3] = timeinfo.tm_hour;
-						usbcmd[4] = timeinfo.tm_mday;
-						usbcmd[5] = timeinfo.tm_mon+1;
-						usbcmd[6] = (timeinfo.tm_wday==0)?7:timeinfo.tm_wday;
-						usbcmd[7] = timeinfo.tm_year-100;
-						for(i=1; i<8;i++) {
-							usbcmd[i] = ((usbcmd[i]/10)*0x10) + (usbcmd[i]%10);
-						}
-						usb_send(dev_handle, (unsigned char *)usbcmd, false);
-
-						memset(usbcmd, 0, sizeof(usbcmd));
-						usbcmd[2] = 0x0d;
-						usb_send(dev_handle, (unsigned char *)usbcmd, false);
-
-						memset(usbcmd, 0, sizeof(usbcmd));
-						usbcmd[0] = 0x06;
-						usbcmd[1] = 0x02;
-						usbcmd[2] = 0x01;
-						usbcmd[3] = 0x02;
+		 		ptr = strtok(NULL, tok_delimiter);
+				if( ptr != NULL ) {
+					scene = strtol(ptr, NULL, 10);
+					if( scene >= 1 && scene<=254 ) {
+						usbcmd[0] = 0x0f;
+						usbcmd[1] = 0x01 * scene;
 						if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
 							write_to_client(socket_handle, "USB communication error\r\n");
+							fcmdok = false;
+						}
+					}
+					else {
+						write_to_client(socket_handle, "SCENE: parameter <s> out of range (must be within range 1-254)\r\n");
+						fcmdok = false;
+					}
+				}
+				else {
+					write_to_client(socket_handle, "SCENE: missing parameter\r\n");
+					fcmdok = false;
+				}
+		 	}
+		 	/* Get commands */
+			else if (cmdcompare(ptr, "GET") == 0) {
+				/* next token GET device */
+		 		ptr = strtok(NULL, tok_delimiter);
+		 		if( ptr!=NULL ) {
+					if (cmdcompare(ptr, "CLOCK") == 0 ||
+						cmdcompare(ptr, "TIME") == 0) {
+						struct tm timeinfo;
+
+						usbcmd[0] = 0x09;
+						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
+							write_to_client(socket_handle, "USB communication error\r\n");
+							fcmdok = false;
+						}
+						/* ss mm hh dd MM ww yy 00 */
+						timeinfo.tm_sec  = usbcmd[0];
+						timeinfo.tm_min  = usbcmd[1];
+						timeinfo.tm_hour = usbcmd[2];
+						timeinfo.tm_mday = usbcmd[3];
+						timeinfo.tm_mon  = usbcmd[4]-1;
+						timeinfo.tm_year = usbcmd[6] + 100;
+						mktime ( &timeinfo );
+						write_to_client(socket_handle, "%s\r", asctime(&timeinfo) );
+
+					} else if (cmdcompare(ptr, "TEMP") == 0 ) {
+						usbcmd[0] = 0x0c;
+						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
+							write_to_client(socket_handle, "USB communication error\r\n");
+							fcmdok = false;
+						}
+						else if( usbcmd[0]==0xfd ) {
+							write_to_client(socket_handle, "%.1f\r\n", (float)usbcmd[1]/2);
+						}
+					} else if (cmdcompare(ptr, "HOUSECODE") == 0 ) {
+						char buf[64];
+						write_to_client(socket_handle, "%s\r\n", itofs20(buf, housecode, NULL));
+					}
+					else {
+						write_to_client(socket_handle, "GET: unknown parameter '%s'\r\n", ptr);
+						fcmdok = false;
+					}
+				}
+				else {
+					write_to_client(socket_handle, "GET: missing parameter\r\n");
+					fcmdok = false;
+				}
+		 	}
+		 	/* Set commands */
+			else if (cmdcompare(ptr, "SET") == 0) {
+		 		ptr = strtok(NULL, tok_delimiter);
+		 		/* next token SET device */
+		 		if( ptr!=NULL ) {
+					if (cmdcompare(ptr, "CLOCK") == 0 ||
+						cmdcompare(ptr, "TIME") == 0) {
+						int cmd = 8;
+					  	time_t now;
+					  	struct tm * currenttime;
+						struct tm timeinfo;
+
+				        time(&now);
+				        currenttime = localtime(&now);
+				        memcpy(&timeinfo, currenttime, sizeof(timeinfo));
+
+				        /* next token new time (optional) */
+				 		ptr = strtok(NULL, tok_delimiter);
+				 		if( ptr!=NULL ) {
+							switch( strlen(ptr) ) {
+								case 8:		/* MMDDhhmm */
+							        strptime(ptr, "%m%d%H%M", &timeinfo);
+									break;
+								case 10:	/* MMDDhhmmYY */
+							        strptime(ptr, "%m%d%H%M%y", &timeinfo);
+									break;
+								case 11:	/* MMDDhhmm.ss */
+							        strptime(ptr, "%m%d%H%M.%S", &timeinfo);
+									break;
+								case 12:	/* MMDDhhmmCCYY */
+							        strptime(ptr, "%m%d%H%M%Y", &timeinfo);
+									break;
+								case 13:	/* MMDDhhmmYY.ss */
+							        strptime(ptr, "%m%d%H%M%y.%S", &timeinfo);
+									break;
+								case 15:	/* MMDDhhmmCCYY.ss */
+							        strptime(ptr, "%m%d%H%M%Y.%S", &timeinfo);
+									break;
+								default:
+									write_to_client(socket_handle, "SET CLOCK: wrong time format (use MMDDhhmm[[CC]YY][.ss])\r\n");
+									fcmdok = false;
+									cmd = -1;
+									break;
+							}
+				 		}
+				 		if( cmd != -1 ) {
+				 			int i;
+							usbcmd[0] = cmd;
+							usbcmd[1] = timeinfo.tm_sec;
+							usbcmd[2] = timeinfo.tm_min;
+							usbcmd[3] = timeinfo.tm_hour;
+							usbcmd[4] = timeinfo.tm_mday;
+							usbcmd[5] = timeinfo.tm_mon+1;
+							usbcmd[6] = (timeinfo.tm_wday==0)?7:timeinfo.tm_wday;
+							usbcmd[7] = timeinfo.tm_year-100;
+							for(i=1; i<8;i++) {
+								usbcmd[i] = ((usbcmd[i]/10)*0x10) + (usbcmd[i]%10);
+							}
+							usb_send(dev_handle, (unsigned char *)usbcmd, false);
+
+							memset(usbcmd, 0, sizeof(usbcmd));
+							usbcmd[2] = 0x0d;
+							usb_send(dev_handle, (unsigned char *)usbcmd, false);
+
+							memset(usbcmd, 0, sizeof(usbcmd));
+							usbcmd[0] = 0x06;
+							usbcmd[1] = 0x02;
+							usbcmd[2] = 0x01;
+							usbcmd[3] = 0x02;
+							if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+								write_to_client(socket_handle, "USB communication error\r\n");
+								fcmdok = false;
+							}
+				 		}
+				 	}
+					else if (cmdcompare(ptr, "HOUSECODE") == 0 ) {
+				        /* next token new housecode */
+				 		ptr = strtok(NULL, tok_delimiter);
+				 		if( ptr!=NULL ) {
+				 			int newhc = fs20toi(ptr, NULL);
+				 			if ( newhc>= 0 ) {
+				 				housecode = newhc;
+				 			}
+				 			else {
+				 				write_to_client(socket_handle, "SET HOUSECODE: wrong paramater '%s'\r\n", ptr);
+				 				fcmdok = false;
+				 			}
 						}
 						else {
-							write_to_client(socket_handle, "OK\r\n");
+							write_to_client(socket_handle, "SET HOUSECODE: missing paramater\r\n");
+							fcmdok = false;
 						}
-			 		}
-			 	}
+					}
+					else {
+						write_to_client(socket_handle, "SET: unknown parameter '%s'\r\n", ptr);
+						fcmdok = false;
+					}
+				}
 				else {
-					write_to_client(socket_handle, "SET: unknown parameter '%s'\r\n", ptr);
+					write_to_client(socket_handle, "SET: missing parameter\r\n");
+					fcmdok = false;
 				}
 			}
-			else {
-				write_to_client(socket_handle, "SET: missing parameter\r\n");
-			}
-		}
-	 	/* Control commands */
-		else if (cmdcompare(input, "WAIT") == 0) {
-			long int ms;
+		 	/* Control commands */
+			else if (cmdcompare(ptr, "WAIT") == 0) {
+				long int ms;
 
-	 		ptr = strtok(NULL, delimiter);
-			if( ptr != NULL ) {
-				ms = strtol(ptr, NULL, 10);
-				usleep(ms*1000L);
-				write_to_client(socket_handle, "OK\r\n");
+		 		ptr = strtok(NULL, tok_delimiter);
+				if( ptr != NULL ) {
+					ms = strtol(ptr, NULL, 10);
+					usleep(ms*1000L);
+				}
+				else {
+					write_to_client(socket_handle, "WAIT: missing parameter\r\n");
+					fcmdok = false;
+				}
+		 	}
+			else if (cmdcompare(ptr, "QUIT") == 0 || cmdcompare(ptr, "Q") == 0) {
+				return -1; //exit
+			}
+			else if (cmdcompare(ptr, "EXIT") == 0 || cmdcompare(ptr, "E") == 0) {
+				return -2; //end
 			}
 			else {
-				write_to_client(socket_handle, "WAIT: missing parameter\r\n");
+				write_to_client(socket_handle, "unknown command '%s'\r\n", ptr);
+				fcmdok = false;
 			}
-	 	}
-		else if (cmdcompare(input, "QUIT") == 0 || cmdcompare(input, "Q") == 0) {
-			return -1; //exit
 		}
-		else if (cmdcompare(input, "EXIT") == 0 || cmdcompare(input, "E") == 0) {
-			return -2; //end
-		}
-		else {
-			write_to_client(socket_handle, "\error - unknown command '%s'\r\n", ptr);
-		}
+
+	}
+
+	if( fcmdok ) {
+		write_to_client(socket_handle, "OK\r\n");
 	}
 
 	return 0;
@@ -1095,12 +1190,10 @@ int main(int argc, char * argv[]) {
 	int rc = 0;
 	char cmdexec[MSG_BUFFER_MAXLEN];
 
-	debug(LOG_INFO, "Starting %s (%s)", PROGNAME, VERSION);
-
 	memset(cmdexec, 0, sizeof(cmdexec));
 	while (true)
 	{
-		int result = getopt(argc, argv, "c:dgp:h:v?");
+		int result = getopt(argc, argv, "c:dgh:p:sv?");
 		if (result == -1) break; /* end of list */
 		switch (result)
 		{
@@ -1113,7 +1206,7 @@ int main(int argc, char * argv[]) {
 					debug(LOG_WARNING, "Starting as daemon with parameter -c is not possible, disable daemon flag");
 					fDaemon = false;
 				}
-				debug(LOG_INFO, "Execute command(s) '%s'", optarg);
+				debug(LOG_DEBUG, "Execute command(s) '%s'", optarg);
 				strncpy(cmdexec, optarg, sizeof(cmdexec));
 				break;
 			case 'd':
@@ -1127,22 +1220,22 @@ int main(int argc, char * argv[]) {
 				break;
 			case 'g':
 				fDebug = true;
-				debug(LOG_INFO, "Debug enabled");
+				debug(LOG_DEBUG, "Debug enabled");
 				break;
 			case 'h':
 				{
 					char buf[64];
 					housecode = fs20toi(optarg, NULL);
-					debug(LOG_INFO, "Using housecode %s (%0dd, 0x%04x, FS20=%s)", optarg, housecode, housecode, itofs20(buf, housecode, NULL));
+					debug(LOG_DEBUG, "Using housecode %s (%0dd, 0x%04x, FS20=%s)", optarg, housecode, housecode, itofs20(buf, housecode, NULL));
 				}
 				break;
 			case 'p':
 				port = strtol(optarg, NULL, 10);
-				debug(LOG_INFO, "Using TCP port %d for listening", port);
+				debug(LOG_DEBUG, "Using TCP port %d for listening", port);
 				break;
 			case 's':
 				fsyslog = true;
-				debug(LOG_INFO, "Output to syslog");
+				debug(LOG_DEBUG, "Output to syslog");
 				break;
 			case '?': /* unknown parameter */
 				prog_version();
@@ -1161,17 +1254,15 @@ int main(int argc, char * argv[]) {
 		debug(LOG_WARNING, "Unknown parameter <%s>", argv[optind++]);
 	}
 
+
 	/* Starting as daemon if requested */
 	if( fDaemon ) {
 		pid_t pid, sid;
 
+		debug(LOG_INFO, "Starting %s (%s)", PROGNAME, VERSION);
 		/* Fork off the parent process */
 		pid = fork();
-		if (pid < 0) {
-			// Log failure (use syslog if possible)
-			debug(LOG_ERR, "Unable to fork the process");
-			exit(EXIT_FAILURE);
-		}
+		exit_if(pid < 0);
 		// If we got a good PID, then we can exit the parent process.
 		if (pid > 0) {
 			exit(EXIT_SUCCESS);
@@ -1181,11 +1272,7 @@ int main(int argc, char * argv[]) {
 
 		/* Create a new SID for the child process */
 		sid = setsid();
-		if (sid < 0) {
-			/* Log any failures here */
-			syslog(LOG_ERR, "Unable to create a new SID for the child process");
-			exit(EXIT_FAILURE);
-		}
+		exit_if(sid < 0);
 		pid = sid;
 		/* Close out the standard file descriptors */
 		close(STDIN_FILENO);
@@ -1202,47 +1289,35 @@ int main(int argc, char * argv[]) {
 
 		/* If command line cmd is given, execute cmd and exit */
 		if( *cmdexec ) {
-			char delimiter[] = ",;";
-			char *ptr;
-			int rc = 0;
-			char *token[100];
-			int i;
-
-			i = 0;
-			token[i] = strtok(cmdexec, delimiter);
-			while( token[i] ) {
-				token[++i] = strtok(NULL, delimiter);
-			}
-			i = 0;
-			while( rc>=0 && token[i]!=NULL ) {
-				rc = handle_input(trim(token[i++]), dev_handle, 0);
-			}
+			rc = handle_input(trim(cmdexec), dev_handle, 0);
 		}
 		/* otherwise start TCP listing */
 		else {
 			/* open main TCP listening socket */
 			listen_fd = tcp_server_init(port);
-			debug(LOG_DEBUG, "Listening now on port %d (handle %d)", port, listen_fd);
-			FD_ZERO(&socks);
+			if( listen_fd >= 0 ) {
+				debug(LOG_DEBUG, "Listening now on port %d (handle %d)", port, listen_fd);
+				FD_ZERO(&socks);
 
-			/* main loop */
-			while (true) {
-				int client_fd;
-				void *arg;
+				/* main loop */
+				while (true) {
+					int client_fd;
+					void *arg;
 
-				/* Check TCP server listen port (client connect) */
-				client_fd = tcp_server_connect(listen_fd);
-				debug(LOG_DEBUG, "Client connected (handle=%d)", client_fd);
-				if (client_fd >= 0) {
-					pthread_t	thread_id;
+					/* Check TCP server listen port (client connect) */
+					client_fd = tcp_server_connect(listen_fd);
+					debug(LOG_DEBUG, "Client connected (handle=%d)", client_fd);
+					if (client_fd >= 0) {
+						pthread_t	thread_id;
 
-					pthread_mutex_lock(&mutex_socks);
-					FD_SET(client_fd, &socks);
-					pthread_mutex_unlock(&mutex_socks);
+						pthread_mutex_lock(&mutex_socks);
+						FD_SET(client_fd, &socks);
+						pthread_mutex_unlock(&mutex_socks);
 
-					/* start thread for client command handling */
-					arg = (void *)client_fd;
-					pthread_create(&thread_id, NULL, tcp_server_handle_client, arg);
+						/* start thread for client command handling */
+						arg = (void *)client_fd;
+						pthread_create(&thread_id, NULL, tcp_server_handle_client, arg);
+					}
 				}
 			}
 			rc = usb_release();
