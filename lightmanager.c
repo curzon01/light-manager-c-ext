@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 1.2.0009
+ Version     : 1.2.0010
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -41,6 +41,9 @@
 	1.02.0009
 			+ multiple commands also possible on TCP connection command line (as it still works for -c parameter)
 			+ New command GET/SET HOUSECODE (get/set FS20 housecode on command line)
+
+	1.02.0010
+			* FS20 command parameter changed
 */
 
 #include <stdio.h>
@@ -63,7 +66,7 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"1.2.0009"
+#define VERSION				"1.2.0010"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -548,18 +551,25 @@ void client_cmd_help(int socket_handle)
 						"    GET CLOCK         Read the current device date and time\r\n"
 						"    GET HOUSECODE     Read the current FS20 housecode\r\n"
 						"    GET TEMP          Read the current device temperature sensor\r\n"
-						"    SET HOUSECODE hc  Set the FS20 housecode where\r\n"
-						"                        adr  FS20 housecode, format xxxxxxxx (11111111-44444444)\r\n"
+						"    SET HOUSECODE adr Set the FS20 housecode where\r\n"
+						"                        adr  FS20 housecode (11111111-44444444)\r\n"
 						"    SET CLOCK [time]  Set the device clock to system time or to <time>\r\n"
 						"                      where time format is MMDDhhmm[[CC]YY][.ss]\r\n"
 						"\r\n"
 						"Device commands\r\n"
 						"    FS20 addr cmd     Send a FS20 command where\r\n"
 						"                        adr  FS20 address using the format ggss (1111-4444)\r\n"
-						"                        cmd  Command ON|OFF|TOGGLE|UP|+|DOWN|-|<dim>\r\n"
-						"                             where <dim> is the dim level\r\n"
-						"                             * absolute values:   0 (min=off) to 16 (max))\r\n"
-						"                             * percentage values: O\% to 100\%)\r\n"
+						"                        cmd  Command ON|OFF|TOGGLE|BRIGHT|+|DARK|-|<dim>\r\n"
+						"                             ON|UP|OPEN      Switches ON or open a jalousie\r\n"
+						"                             OFF|DOWN|CLOSE  Switches OFF or close a jalousie\r\n"
+						"                             +|BRIGHT        regulate dimmer one step up\r\n"
+						"                             +|DARK          regulate dimmer one step down\r\n"
+						"                             <dim>           is a absoulte or percentage dim\r\n"
+						"                                             value:\r\n"
+						"                                             for absolute dim use 0 (min=off)\r\n"
+						"                                             to 16 (max)\r\n"
+						"                                             for percentage dim use 0% (off) to\r\n"
+						"                                             100% (max)\r\n"
 						"    IT code addr cmd    Send an InterTechno command where\r\n"
 						"                        code  InterTechno housecode (A-P)\r\n"
 						"                        addr  InterTechno channel (1-16)\r\n"
@@ -636,15 +646,15 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 						/* next token: cmd */
 				 		ptr = strtok(NULL, tok_delimiter);
 				 		if( ptr!=NULL ) {
-							if (cmdcompare(ptr, "ON") == 0) {
+							if (cmdcompare(ptr, "ON") == 0 || cmdcompare(ptr, "UP") == 0  || cmdcompare(ptr, "OPEN") == 0) {
 								cmd = 0x11;
-							} else if (cmdcompare(ptr, "OFF") == 0) {
+							} else if (cmdcompare(ptr, "OFF") == 0 || cmdcompare(ptr, "DOWN") == 0  || cmdcompare(ptr, "CLOSE") == 0) {
 								cmd = 0x00;
 							} else if (cmdcompare(ptr, "TOGGLE") == 0) {
 								cmd = 0x12;
-							} else if (cmdcompare(ptr, "UP") == 0 || cmdcompare(ptr, "+") == 0 ) {
+							} else if (cmdcompare(ptr, "BRIGHT") == 0 || cmdcompare(ptr, "+") == 0 ) {
 								cmd = 0x13;
-							} else if (cmdcompare(ptr, "DOWN") == 0 || cmdcompare(ptr, "-") == 0 ) {
+							} else if (cmdcompare(ptr, "DARK") == 0 || cmdcompare(ptr, "-") == 0 ) {
 								cmd = 0x14;
 							}
 							/* dimming case */
@@ -1220,6 +1230,7 @@ int main(int argc, char * argv[]) {
 				break;
 			case 'g':
 				fDebug = true;
+				debug(LOG_DEBUG, "%s (%s)", PROGNAME, VERSION);
 				debug(LOG_DEBUG, "Debug enabled");
 				break;
 			case 'h':
