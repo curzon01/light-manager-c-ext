@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 1.2.0011
+ Version     : 1.2.0012
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -50,6 +50,9 @@
 			* additonal log program exit errors to stderr (even output is set to syslog)
 			- Segmentation fault on ubs_connect when no device is connected
 			- Segmentation fault on TCP command help output
+
+	1.02.0012
+			+ Added pidfile
 */
 
 #include <stdio.h>
@@ -72,7 +75,7 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"1.2.0011"
+#define VERSION				"1.2.0012"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -109,7 +112,7 @@ if(expr) { \
 #define DEF_SYSLOG		false
 #define DEF_PORT		3456
 #define DEF_HOUSECODE	0x0000
-
+#define DEF_PIDFILE		"/var/run/lightmanager.pid"
 
 
 /* ======================================================================== */
@@ -122,6 +125,7 @@ bool fsyslog;
 unsigned int port;
 unsigned long s_addr;
 unsigned int housecode;
+char pidfile[512];
 
 /* TCP */
 fd_set socks;
@@ -157,6 +161,12 @@ int usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool 
 
 /* Helper Functions */
 void debug(int priority, const char *format, ...);
+FILE *openfile(const char* filename, const char* mode);
+void closefile(FILE	*filehandle);
+void createpidfile(const char *pidfile, pid_t pid);
+void removepidfile(const char *pidfile);
+void cleanup(int sig);
+void sigfunc(int sig);
 void write_to_client(int socket_handle, const char *format, ...);
 void client_cmd_help(int socket_handle);
 int cmdcompare(const char * cs, const char * ct);
@@ -505,7 +515,40 @@ void debug(int priority, const char *format, ...)
 	va_end(args);
 }
 
-cleanup(int sig)
+FILE *openfile(const char* filename, const char* mode)
+{
+	FILE *filehandle;
+
+	if (filehandle = fopen(filename, "r")) {
+		fclose(filehandle);
+	}
+	filehandle = fopen ( filename, mode );
+	return filehandle;
+}
+
+void closefile(FILE	*filehandle)
+{
+	if( filehandle==NULL )
+		return;
+
+	fclose ( filehandle	);
+}
+
+void createpidfile(const char *pidfile, pid_t pid)
+{
+	FILE *fpidfile = openfile(pidfile,"w");
+	if( fpidfile!= NULL ) {
+		fprintf(fpidfile, "%d\n", pid);
+		closefile(fpidfile);
+	}
+}
+
+void removepidfile(const char *pidfile)
+{
+	remove(pidfile);
+}
+
+void cleanup(int sig)
 {
 	const char *reason;
 
@@ -523,7 +566,8 @@ cleanup(int sig)
 			reason = "unknown";
 			break;
 	}
-	debug(LOG_INFO, "Terminate program %s %s (%s)", PROGNAME, VERSION, reason);
+	removepidfile(pidfile);
+	debug(LOG_INFO, "Terminate program %s (%s) - %s", PROGNAME, VERSION, reason);
 }
 
 void sigfunc(int sig)
@@ -1209,7 +1253,8 @@ void usage(void)
 	printf("    -a addr       Listen on TCP <addr> for command client (default all available)\n");
 	printf("    -c cmd        Execute command <cmd> and exit (separate commands by ';' or ',')\n");
 	printf("    -d            Start as daemon (default %s)\n", DEF_DAEMON?"yes":"no");
-	printf("    -g            Debug mode (default %s)\n", DEF_DEBUG?"yes":"no");
+	printf("    -f pidfile    PID file name and location (default %s)\n", DEF_PIDFILE);
+	printf("    -g            Debug mode (default %s)\n", DEF_DEBUG?"enabled":"disabled");
 	printf("    -h housecode  Use <housecode> for sending FS20 data (default %s)\n", itofs20(buf, DEF_HOUSECODE, NULL));
 	printf("    -p port       Listen on TCP <port> for command client (default %d)\n", DEF_PORT);
 	printf("    -s            Redirect output to syslog instead of stdout (default)\n");
@@ -1221,6 +1266,7 @@ void usage(void)
 int main(int argc, char * argv[]) {
 	int listen_fd;
 	int rc = 0;
+	pid_t pid, sid;
 	char cmdexec[MSG_BUFFER_MAXLEN];
 
 	memset(cmdexec, 0, sizeof(cmdexec));
@@ -1230,11 +1276,14 @@ int main(int argc, char * argv[]) {
 	port = DEF_PORT;
 	s_addr = htonl(INADDR_ANY);
 	housecode = DEF_HOUSECODE;
+	strncpy(pidfile, DEF_PIDFILE, sizeof(pidfile));
 
 	while (true)
 	{
 		int result = getopt(argc, argv, "a:c:dgh:p:sv?");
-		if (result == -1) break; /* end of list */
+		if (result == -1) {
+			break; /* end of list */
+		}
 		switch (result)
 		{
 			case ':': /* missing argument of a parameter */
@@ -1261,6 +1310,11 @@ int main(int argc, char * argv[]) {
 					fDaemon = true;
 					debug(LOG_INFO, "Starting as daemon");
 				}
+				break;
+			case 'f':
+				memset(pidfile, '\0', sizeof(pidfile));
+				strncpy(pidfile, optarg, sizeof(pidfile));
+				debug(LOG_DEBUG, "pidfile %s", pidfile);
 				break;
 			case 'g':
 				fDebug = true;
@@ -1302,8 +1356,6 @@ int main(int argc, char * argv[]) {
 
 	/* Starting as daemon if requested */
 	if( fDaemon ) {
-		pid_t pid, sid;
-
 		debug(LOG_INFO, "Starting %s (%s)", PROGNAME, VERSION);
 		/* Fork off the parent process */
 		pid = fork();
@@ -1324,10 +1376,14 @@ int main(int argc, char * argv[]) {
 		close(STDOUT_FILENO);
 		close(STDERR_FILENO);
 	}
+	else {
+		pid=getpid();
+	}
 	signal(SIGINT,sigfunc);
 	signal(SIGKILL,sigfunc);
 	signal(SIGTERM,sigfunc);
 
+	createpidfile(pidfile, pid);
 
 	rc = usb_connect();
 	if( rc == EXIT_SUCCESS ) {
@@ -1350,10 +1406,10 @@ int main(int argc, char * argv[]) {
 
 					/* Check TCP server listen port (client connect) */
 					client_fd = tcp_server_connect(listen_fd);
-					debug(LOG_DEBUG, "Client connected (handle=%d)", client_fd);
 					if (client_fd >= 0) {
 						pthread_t	thread_id;
 
+						debug(LOG_DEBUG, "Client connected (handle=%d)", client_fd);
 						pthread_mutex_lock(&mutex_socks);
 						FD_SET(client_fd, &socks);
 						pthread_mutex_unlock(&mutex_socks);
@@ -1362,10 +1418,16 @@ int main(int argc, char * argv[]) {
 						arg = (void *)client_fd;
 						pthread_create(&thread_id, NULL, tcp_server_handle_client, arg);
 					}
+					else {
+						usleep( 50*1000L );
+					}
+						
 				}
 			}
 			rc = usb_release();
 		}
 	}
+
+	cleanup(SIGTERM);
 	return rc;
 }
