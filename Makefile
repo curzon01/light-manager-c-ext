@@ -9,5 +9,5 @@ lightmanager: lightmanager.c
 clean:
 	rm -f *.o *~ *.so *.out lightmanager
 
-
-
+install:
+	cp ./lightmanager /usr/local/bin/
