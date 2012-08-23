@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 1.2.0010
+ Version     : 1.2.0011
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -44,6 +44,12 @@
 
 	1.02.0010
 			* FS20 command parameter changed
+
+	1.02.0011
+			+ Added parameter -a (listen for address)
+			* additonal log program exit errors to stderr (even output is set to syslog)
+			- Segmentation fault on ubs_connect when no device is connected
+			- Segmentation fault on TCP command help output
 */
 
 #include <stdio.h>
@@ -66,13 +72,13 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"1.2.0010"
+#define VERSION				"1.2.0011"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
 #define exit_if(expr) \
 if(expr) { \
-  debug(LOG_DEBUG, "%s: %d: %s: Error - %s", __FILE__, __LINE__, __PRETTY_FUNCTION__, strerror(errno)); \
+  debug(LOG_ERR, "%s: %d: %s: Error - %s", __FILE__, __LINE__, __PRETTY_FUNCTION__, strerror(errno)); \
   exit(1); \
 }
 #define return_if(expr, retvalue) \
@@ -110,11 +116,12 @@ if(expr) { \
 /* Global vars */
 /* ======================================================================== */
 /* program parameter variables */
-bool fDaemon	= DEF_DAEMON;
-bool fDebug		= DEF_DEBUG;
-bool fsyslog	= DEF_SYSLOG;
-unsigned int port = DEF_PORT;
-unsigned int housecode = DEF_HOUSECODE;
+bool fDaemon;
+bool fDebug;
+bool fsyslog;
+unsigned int port;
+unsigned long s_addr;
+unsigned int housecode;
 
 /* TCP */
 fd_set socks;
@@ -368,7 +375,10 @@ int usb_connect(void)
 
 	dev_handle = libusb_open_device_with_vid_pid(usbContext, LM_VENDOR_ID, LM_PRODUCT_ID); /* VendorID and ProductID in decimal */
 	if (dev_handle == NULL ) {
-		debug(LOG_DEBUG, "Cannot open device vendor %04x, product %04x", LM_VENDOR_ID, LM_PRODUCT_ID);
+		debug(LOG_DEBUG, "Cannot open USB device (vendor 0x%04x, product 0x%04x)", LM_VENDOR_ID, LM_PRODUCT_ID);
+		libusb_exit(usbContext);
+		pthread_mutex_unlock(&mutex_usb);
+		return EXIT_FAILURE;
 	}
 	if (libusb_kernel_driver_active(dev_handle, 0) == 1) {
 		debug(LOG_DEBUG, "Kernel driver active");
@@ -384,6 +394,8 @@ int usb_connect(void)
 	rc = libusb_claim_interface(dev_handle, 0);
 	if (rc < 0) {
 		debug(LOG_ERR, "Error: Cannot claim interface\n");
+		libusb_close(dev_handle);
+		libusb_exit(usbContext);
 		pthread_mutex_unlock(&mutex_usb);
 		return EXIT_FAILURE;
 	}
@@ -479,6 +491,11 @@ void debug(int priority, const char *format, ...)
 	else {
 		if( fsyslog ) {
 			vsyslog(priority, format, args);
+			/* Additonal output errors to stderr */
+			if( priority == LOG_ERR ) {
+				vfprintf(stderr, format, args);
+				fputs("\n", stdout);
+			}
 		}
 		else {
 			vfprintf(stdout, format, args);
@@ -506,7 +523,7 @@ cleanup(int sig)
 			reason = "unknown";
 			break;
 	}
-	debug(LOG_INFO, "--- Terminate program %s %s (%s)", PROGNAME, VERSION, reason);
+	debug(LOG_INFO, "Terminate program %s %s (%s)", PROGNAME, VERSION, reason);
 }
 
 void sigfunc(int sig)
@@ -547,6 +564,8 @@ void client_cmd_help(int socket_handle)
 					 	"\r\n"
 					 	"%s (%s) help\r\n"
 						"\r\n"
+					, PROGNAME, VERSION);
+	write_to_client(socket_handle,
 						"Light Manager commands\r\n"
 						"    GET CLOCK         Read the current device date and time\r\n"
 						"    GET HOUSECODE     Read the current FS20 housecode\r\n"
@@ -556,6 +575,8 @@ void client_cmd_help(int socket_handle)
 						"    SET CLOCK [time]  Set the device clock to system time or to <time>\r\n"
 						"                      where time format is MMDDhhmm[[CC]YY][.ss]\r\n"
 						"\r\n"
+						);
+	write_to_client(socket_handle,
 						"Device commands\r\n"
 						"    FS20 addr cmd     Send a FS20 command where\r\n"
 						"                        adr  FS20 address using the format ggss (1111-4444)\r\n"
@@ -579,12 +600,14 @@ void client_cmd_help(int socket_handle)
 						"                        cmd  Command UP|+|DOWN|-|STOP\r\n"
 						"    SCENE scn         Activate scene <scn> (1-254)\r\n"
 						"\r\n"
+						);
+	write_to_client(socket_handle,
 						"System commands\r\n"
 						"    ? or HELP         Prints this help\r\n"
 						"    EXIT              Disconnect and exit server programm\r\n"
 						"    QUIT              Disconnect\r\n"
 						"    WAIT ms           Wait for <ms> milliseconds\r\n"
-					, PROGNAME, VERSION);
+						);
 }
 
 
@@ -630,7 +653,6 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 		if( ptr != NULL ) {
 			if (cmdcompare(ptr, "H") == 0 || cmdcompare(ptr, "?") == 0) {
 				client_cmd_help(socket_handle);
-				return 0;
 			}
 			/* FS20 devices */
 			else if (cmdcompare(ptr, "FS20") == 0) {
@@ -1014,9 +1036,11 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				}
 		 	}
 			else if (cmdcompare(ptr, "QUIT") == 0 || cmdcompare(ptr, "Q") == 0) {
+				debug(LOG_DEBUG, "Client QUIT requested");
 				return -1; //exit
 			}
 			else if (cmdcompare(ptr, "EXIT") == 0 || cmdcompare(ptr, "E") == 0) {
+				debug(LOG_DEBUG, "Client EXIT requested");
 				return -2; //end
 			}
 			else {
@@ -1024,7 +1048,6 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				fcmdok = false;
 			}
 		}
-
 	}
 
 	if( fcmdok ) {
@@ -1032,7 +1055,6 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 	}
 
 	return 0;
-
 }
 
 
@@ -1060,18 +1082,18 @@ int tcp_server_init(int port)
 
 	memset((char *) &sock, 0, sizeof(sock));
 	sock.sin_family = AF_INET;
-	sock.sin_addr.s_addr = htonl(INADDR_ANY);
+	sock.sin_addr.s_addr = s_addr;
 	sock.sin_port = htons(port);
 
-	debug(LOG_DEBUG, "Server bind TCP socket");
+	debug(LOG_DEBUG, "Server bind socket");
 	ret = bind(listen_fd, (struct sockaddr *) &sock, sizeof(sock));
-	return_if(ret != 0, -1);
+	exit_if(ret != 0);
 
 	debug(LOG_DEBUG, "Server listening");
 	ret = listen(listen_fd, 5);
-	return_if(ret < 0, -1);
+	exit_if(ret < 0);
 
-	debug(LOG_INFO, "Server now listen on TCP port %d", port);
+	debug(LOG_INFO, "Server now listen on port %d", port);
 
 	return listen_fd;
 }
@@ -1184,7 +1206,8 @@ void usage(void)
 	printf("\nUsage: lightmanager [OPTION]\n");
 	printf("\n");
 	printf("Options are:\n");
-	printf("    -c cmd        Execute command <cmd> and exit (separate several commands by ';' or ',')\n");
+	printf("    -a addr       Listen on TCP <addr> for command client (default all available)\n");
+	printf("    -c cmd        Execute command <cmd> and exit (separate commands by ';' or ',')\n");
 	printf("    -d            Start as daemon (default %s)\n", DEF_DAEMON?"yes":"no");
 	printf("    -g            Debug mode (default %s)\n", DEF_DEBUG?"yes":"no");
 	printf("    -h housecode  Use <housecode> for sending FS20 data (default %s)\n", itofs20(buf, DEF_HOUSECODE, NULL));
@@ -1201,15 +1224,26 @@ int main(int argc, char * argv[]) {
 	char cmdexec[MSG_BUFFER_MAXLEN];
 
 	memset(cmdexec, 0, sizeof(cmdexec));
+	fDaemon = DEF_DAEMON;
+	fDebug = DEF_DEBUG;
+	fsyslog = DEF_SYSLOG;
+	port = DEF_PORT;
+	s_addr = htonl(INADDR_ANY);
+	housecode = DEF_HOUSECODE;
+
 	while (true)
 	{
-		int result = getopt(argc, argv, "c:dgh:p:sv?");
+		int result = getopt(argc, argv, "a:c:dgh:p:sv?");
 		if (result == -1) break; /* end of list */
 		switch (result)
 		{
 			case ':': /* missing argument of a parameter */
 				debug(LOG_ERR, "missing argument\n");
 				return EXIT_FAILURE;
+				break;
+			case 'a':
+				s_addr = inet_addr(optarg);
+				debug(LOG_DEBUG, "Listen on addreess %s", optarg);
 				break;
 			case 'c':
 				if( fDaemon ) {
@@ -1307,7 +1341,6 @@ int main(int argc, char * argv[]) {
 			/* open main TCP listening socket */
 			listen_fd = tcp_server_init(port);
 			if( listen_fd >= 0 ) {
-				debug(LOG_DEBUG, "Listening now on port %d (handle %d)", port, listen_fd);
 				FD_ZERO(&socks);
 
 				/* main loop */
