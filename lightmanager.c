@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 1.2.0012
+ Version     : 1.2.0013
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -53,6 +53,10 @@
 
 	1.02.0012
 			+ Added pidfile
+
+	1.02.0013
+			- Handle broken pipe signal
+			- Handle client disconnect correctly (resulted in 100% CPU load)
 */
 
 #include <stdio.h>
@@ -75,7 +79,7 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"1.2.0012"
+#define VERSION				"1.2.0013"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -145,6 +149,7 @@ libusb_context *usbContext;
 /* Non-ANSI stdlib functions */
 int stricmp(const char *s1, const char *s2);
 int strnicmp(const char *s1, const char *s2, size_t n);
+char *stristr(const char *str1, const char *str2);
 char *itoa(int value, char* result, int base);
 char *ltrim(char *const s);
 char *rtrim(char *const s);
@@ -166,16 +171,17 @@ void closefile(FILE	*filehandle);
 void createpidfile(const char *pidfile, pid_t pid);
 void removepidfile(const char *pidfile);
 void cleanup(int sig);
-void sigfunc(int sig);
-void write_to_client(int socket_handle, const char *format, ...);
+void endfunc(int sig);
+int write_to_client(int socket_handle, const char *format, ...);
 void client_cmd_help(int socket_handle);
 int cmdcompare(const char * cs, const char * ct);
 int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle);
 
 /* TCP socket thread functions */
 int tcp_server_init(int port);
-int tcp_server_connect(int listen_sock);
+int tcp_server_connect(int listen_sock, struct sockaddr_in *psock);
 int recbuffer(int s, void *buf, size_t len, int flags);
+void tcp_server_handle_client_end(int rc, int client_fd);
 void *tcp_server_handle_client(void *arg);
 
 /* Program helper functions */
@@ -213,6 +219,31 @@ int strnicmp(const char *s1, const char *s2, size_t n)
   return f - l;
 }
 
+
+char *stristr(const char *str1, const char *str2) {
+	char *cp = (char *) str1;
+	char *s1, *s2;
+
+	if (!*str2) {
+		return (char *) str1;
+	}
+
+	while (*cp) {
+		s1 = cp;
+		s2 = (char *) str2;
+
+		while ( *s1 && *s2 && !(toupper(*s1) - toupper(*s2)) ) {
+			s1++;
+			s2++;
+		}
+		if (!*s2) {
+			return cp;
+		}
+		cp++;
+	}
+
+	return NULL;
+}
 
 /** * C++ version 0.4 char* style "itoa":
 	* Written by Lukás Chmela
@@ -570,7 +601,7 @@ void cleanup(int sig)
 	debug(LOG_INFO, "Terminate program %s (%s) - %s", PROGNAME, VERSION, reason);
 }
 
-void sigfunc(int sig)
+void endfunc(int sig)
 {
 	if( (sig == SIGINT) ||
 		(sig == SIGKILL) ||
@@ -582,24 +613,29 @@ void sigfunc(int sig)
 	}
 	return;
 }
+void dummyfunc(int sig)
+{
+}
 
-
-void write_to_client(int socket_handle, const char *format, ...)
+int write_to_client(int socket_handle, const char *format, ...)
 {
 	va_list args;
 	char msg[MSG_BUFFER_MAXLEN];
+	int rc=0;
 
 	va_start (args, format);
 	vsprintf (msg, format, args);
 	if( socket_handle != 0 ) {
 		pthread_mutex_lock(&mutex_socks);
-		send(socket_handle, msg, strlen(msg), 0);
+		rc = send(socket_handle, msg, strlen(msg), 0);
 		pthread_mutex_unlock(&mutex_socks);
 	}
 	else {
 		fputs(msg, stdout);
 	}
 	va_end (args);
+
+	return rc;
 }
 
 void client_cmd_help(int socket_handle)
@@ -661,13 +697,52 @@ int cmdcompare(const char * cs, const char * ct)
 	return stricmp(cs, ct);
 }
 
+/* Converts a hex character to its integer value */
+char from_hex(char ch) {
+	return isdigit(ch) ? ch - '0' : tolower(ch) - 'a' + 10;
+}
 
+/* Returns a url-decoded version of str */
+/* IMPORTANT: be sure to free() the returned string after use */
+char *url_decode(char *str) {
+	char *pstr = str;
+	char *buf = malloc(strlen(str) + 1);
+	char *pbuf = buf;
+
+	if( buf == NULL ) {
+		return buf;
+	}
+	while (*pstr) {
+		if (*pstr == '%') {
+			if (pstr[1] && pstr[2]) {
+				*pbuf++ = from_hex(pstr[1]) << 4 | from_hex(pstr[2]);
+				pstr += 2;
+			}
+		}
+		else if (*pstr == '+') {
+			*pbuf++ = ' ';
+		}
+		else {
+			*pbuf++ = *pstr;
+		}
+		pstr++;
+	}
+	*pbuf = '\0';
+
+	return buf;
+}
 /* 	handle command input either via TCP socket or by a given string.
 	if socket_handle is 0, then results will be given via stdout
 	otherwise it wilkl be sent back via TCP to the socket client
+	returns:
+		 0: if success normal
+		-1: if success and client wants to quit
+		-2: if success and client wants to quit also server
+		-3: if sucesss http request
 */
 int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle)
 {
+
 	static char usbcmd[8];
 	char cmd_delimiter[] = CMD_DELIMITER;
 	char *cmds[MAX_CMDS];
@@ -677,6 +752,48 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 	char *ptr;
 	bool fcmdok = true;
 
+
+	if( stristr(input,"GET")==input && stristr(input,"HTTP/1.")!=NULL ) {
+		char *newinput;
+
+		*stristr(input,"HTTP/1.") = '\0';
+		input = stristr(input,"/");
+		if( input!=NULL ) {
+			input = trim(input);
+			debug(LOG_DEBUG, "Handle HTTP request '%s'", input);
+			if( stristr(input,"/cmd=") ) {
+				input = stristr(input,"/cmd=")+5;
+				if( (ptr = url_decode(input)) ) {
+					write_to_client(socket_handle,
+						"HTTP/1.1 %d OK\r\n"
+						"Server: %s/%s (Linux)\r\n"
+						"Content-Length: %d\r\n"
+						"Content-Language: %s\r\n"
+						"Connection: close\r\n"
+						"Content-Type: text/html\r\n"
+						,200
+						,PROGNAME, VERSION
+						,0
+						,"en");
+					handle_input(ptr, dev_handle, socket_handle);
+					free(ptr);
+					return -3;
+				}
+			}
+		}
+		write_to_client(socket_handle,
+			"HTTP/1.1 %d OK\r\n"
+			"Server: %s/%s (Linux)\r\n"
+			"Content-Length: %d\r\n"
+			"Content-Language: %s\r\n"
+			"Connection: close\r\n"
+			"Content-Type: text/html\r\n"
+			,400
+			,PROGNAME, VERSION
+			,0
+			,"en");
+		return -3;
+	}
 
 	debug(LOG_DEBUG, "Handle input '%s'", input);
 
@@ -1143,7 +1260,7 @@ int tcp_server_init(int port)
 }
 
 
-int tcp_server_connect(int listen_sock)
+int tcp_server_connect(int listen_sock, struct sockaddr_in *psock)
 /* Client TCP connection - for each client
  * in listen_sock: Socket main filedescriptor to get client connected
  * return: Client socket filedescriptor or error
@@ -1157,6 +1274,9 @@ int tcp_server_connect(int listen_sock)
 	fd = accept(listen_sock, (struct sockaddr *) &sock, &socklen);
 	return_if(fd < 0, -1);
 
+	if( psock != NULL ) {
+		memcpy(psock, &sock, socklen);
+	}
 	return fd;
 }
 
@@ -1169,14 +1289,29 @@ int recbuffer(int s, void *buf, size_t len, int flags)
 	memset(buf, 0, len);
 	str = (char *)buf;
 	slen = 0;
-	while( (rc=recv(s, str, len, flags)) != -1) {
+	while( (rc=recv(s, str, len, flags)) > 0) {
 		slen += rc;
 		if( rc>0 && *(str+rc-1)=='\r' || *(str+rc-1)=='\n' ) {
 			return slen;
 		}
-		str +=rc;
+		str += rc;
+		// usleep( 50*1000L );
 	}
 	return rc;
+}
+
+void tcp_server_handle_client_end(int rc, int client_fd)
+{
+	debug(LOG_DEBUG, "Disconnect from client (handle %d)", client_fd);
+	/* End of TCP Connection */
+	pthread_mutex_lock(&mutex_socks);
+	FD_CLR(client_fd, &socks);      /* remove dead client_fd */
+	pthread_mutex_unlock(&mutex_socks);
+	close(client_fd);
+	if( rc == -2 ) {
+		rc = usb_release();
+		exit(rc);
+	}
 }
 
 void *tcp_server_handle_client(void *arg)
@@ -1193,28 +1328,35 @@ void *tcp_server_handle_client(void *arg)
 
 	client_fd = (int)arg;
 
+/*
 	write_to_client(client_fd, "Welcome to %s (%s)\r\n"
 							   ">", PROGNAME, VERSION);
+*/
 	while(true) {
 		memset(buf, 0, sizeof(buf));
 		rc = recbuffer(client_fd, buf, sizeof(buf), 0);
-		rc = handle_input(trim(buf), dev_handle, client_fd);
-		if ( rc < 0 ) {
-			debug(LOG_DEBUG, "Disconnect from client (handle %d)", client_fd);
-			write_to_client(client_fd, "bye\r\n");
-			/* End of TCP Connection */
-			pthread_mutex_lock(&mutex_socks);
-			FD_CLR(client_fd, &socks);      /* remove dead client_fd */
-			pthread_mutex_unlock(&mutex_socks);
-			close(client_fd);
-			if( rc== -2 ) {
-				rc = usb_release();
-				exit(rc);
-			}
+		if ( rc <= 0 ) {
+			tcp_server_handle_client_end(rc, client_fd);
 			pthread_exit(NULL);
 		}
 		else {
-			write_to_client(client_fd, ">");
+			rc = handle_input(trim(buf), dev_handle, client_fd);
+			if ( rc < 0 ) {
+				if( rc > -3 ) {
+					write_to_client(client_fd, "bye\r\n");
+				}
+				tcp_server_handle_client_end(rc, client_fd);
+				pthread_exit(NULL);
+			}
+			else {
+				if( write_to_client(client_fd, ">")<0 ) {
+					pthread_mutex_lock(&mutex_socks);
+					FD_CLR(client_fd, &socks);      /* remove dead client_fd */
+					pthread_mutex_unlock(&mutex_socks);
+					close(client_fd);
+					pthread_exit(NULL);
+				}
+			}
 		}
 	}
 	return NULL;
@@ -1379,9 +1521,10 @@ int main(int argc, char * argv[]) {
 	else {
 		pid=getpid();
 	}
-	signal(SIGINT,sigfunc);
-	signal(SIGKILL,sigfunc);
-	signal(SIGTERM,sigfunc);
+	signal(SIGINT,endfunc);
+	signal(SIGKILL,endfunc);
+	signal(SIGTERM,endfunc);
+	signal(SIGPIPE,dummyfunc);
 
 	createpidfile(pidfile, pid);
 
@@ -1401,15 +1544,16 @@ int main(int argc, char * argv[]) {
 
 				/* main loop */
 				while (true) {
+					struct sockaddr_in sock;
 					int client_fd;
 					void *arg;
 
 					/* Check TCP server listen port (client connect) */
-					client_fd = tcp_server_connect(listen_fd);
+					client_fd = tcp_server_connect(listen_fd, &sock);
 					if (client_fd >= 0) {
-						pthread_t	thread_id;
+						pthread_t thread_id;
 
-						debug(LOG_DEBUG, "Client connected (handle=%d)", client_fd);
+						debug(LOG_DEBUG, "Client connected from %s (handle=%d)", inet_ntoa(sock.sin_addr), client_fd);
 						pthread_mutex_lock(&mutex_socks);
 						FD_SET(client_fd, &socks);
 						pthread_mutex_unlock(&mutex_socks);
@@ -1418,10 +1562,6 @@ int main(int argc, char * argv[]) {
 						arg = (void *)client_fd;
 						pthread_create(&thread_id, NULL, tcp_server_handle_client, arg);
 					}
-					else {
-						usleep( 50*1000L );
-					}
-						
 				}
 			}
 			rc = usb_release();

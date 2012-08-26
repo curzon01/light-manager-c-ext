@@ -1,4 +1,5 @@
 CC=gcc
+CFLAGS=
 LDFLAGS=-lusb-1.0
 
 all: lightmanager
