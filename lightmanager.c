@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 1.2.0013
+ Version     : 1.2.0014
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -57,6 +57,9 @@
 	1.02.0013
 			- Handle broken pipe signal
 			- Handle client disconnect correctly (resulted in 100% CPU load)
+
+	1.02.0014
+			- FS20 address 1111 not accepted
 */
 
 #include <stdio.h>
@@ -79,7 +82,7 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"1.2.0013"
+#define VERSION				"1.2.0014"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -598,7 +601,9 @@ void cleanup(int sig)
 			break;
 	}
 	removepidfile(pidfile);
-	debug(LOG_INFO, "Terminate program %s (%s) - %s", PROGNAME, VERSION, reason);
+	if( fDaemon ) {
+		debug(LOG_INFO, "Terminate program %s (%s) - %s", PROGNAME, VERSION, reason);
+	}
 }
 
 void endfunc(int sig)
@@ -608,7 +613,6 @@ void endfunc(int sig)
 		(sig == SIGTERM) )
 	{
 		cleanup(sig);
-		debug(LOG_INFO, "exiting");
 		exit (0);
 	}
 	return;
@@ -825,7 +829,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 		 		ptr = strtok(NULL, tok_delimiter);
 		 		if( ptr!=NULL ) {
 					int addr = fs20toi(ptr, &cp);
-					if ( addr > 0 ) {
+					if ( addr >= 0 ) {
 						/* next token: cmd */
 				 		ptr = strtok(NULL, tok_delimiter);
 				 		if( ptr!=NULL ) {
@@ -1328,10 +1332,6 @@ void *tcp_server_handle_client(void *arg)
 
 	client_fd = (int)arg;
 
-/*
-	write_to_client(client_fd, "Welcome to %s (%s)\r\n"
-							   ">", PROGNAME, VERSION);
-*/
 	while(true) {
 		memset(buf, 0, sizeof(buf));
 		rc = recbuffer(client_fd, buf, sizeof(buf), 0);
@@ -1450,7 +1450,6 @@ int main(int argc, char * argv[]) {
 				}
 				else {
 					fDaemon = true;
-					debug(LOG_INFO, "Starting as daemon");
 				}
 				break;
 			case 'f':
@@ -1498,7 +1497,7 @@ int main(int argc, char * argv[]) {
 
 	/* Starting as daemon if requested */
 	if( fDaemon ) {
-		debug(LOG_INFO, "Starting %s (%s)", PROGNAME, VERSION);
+		debug(LOG_INFO, "Starting %s (%s) as daemon", PROGNAME, VERSION);
 		/* Fork off the parent process */
 		pid = fork();
 		exit_if(pid < 0);
