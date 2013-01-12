@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 1.2.0014
+ Version     : 2.0.0015
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -60,6 +60,17 @@
 
 	1.02.0014
 			- FS20 address 1111 not accepted
+
+	2.00.0015
+			+ Web Server functionality added:
+			  Usage: http://<server>/cmd=<command>[&<command>[&...]]
+			         where <command> are a valid command (see command 'help')
+			         multiple commands can be used delimited by a ampersand char &
+			         e.g.
+			         http://<serverip>/cmd=get time&get temp
+			         reads the current clock and temperature
+			+ Command VERSION added
+
 */
 
 #include <stdio.h>
@@ -82,7 +93,8 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"1.2.0014"
+#define VERSION				"2.0"
+#define BUILD				"0015"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -108,7 +120,7 @@ if(expr) { \
 #define INPUT_BUFFER_MAXLEN	1024		/* TCP commmand string buffer size */
 #define MSG_BUFFER_MAXLEN	2048		/* TCP return message string buffer size */
 
-#define CMD_DELIMITER		",;"		/* Command line command delimiter can be ; or , */
+#define CMD_DELIMITER		",;&"		/* Command line command delimiter */
 #define MAX_CMDS			500			/* Max number of commands per command line */
 #define TOKEN_DELIMITER 	" ,;\t\v\f" /* Command line token delimiter */
 
@@ -120,6 +132,11 @@ if(expr) { \
 #define DEF_PORT		3456
 #define DEF_HOUSECODE	0x0000
 #define DEF_PIDFILE		"/var/run/lightmanager.pid"
+
+
+/* Several output flags for handle_input() and subfunctions */
+#define HANDLE_INPUT_NOOK	1	// SET if the additional successful "OK" at the end of a command will be suppressed
+#define HANDLE_INPUT_HTML	2	// SET if output should be in HTML format
 
 
 /* ======================================================================== */
@@ -150,22 +167,23 @@ libusb_context *usbContext;
 /* Prototypes */
 /* ======================================================================== */
 /* Non-ANSI stdlib functions */
-int stricmp(const char *s1, const char *s2);
-int strnicmp(const char *s1, const char *s2, size_t n);
+int  stricmp(const char *s1, const char *s2);
+int  strnicmp(const char *s1, const char *s2, size_t n);
 char *stristr(const char *str1, const char *str2);
+char *str_replace(const char *string, const char *substr, const char *replacement);
 char *itoa(int value, char* result, int base);
 char *ltrim(char *const s);
 char *rtrim(char *const s);
 char *trim(char *const s);
 
 /* FS20 specific  */
-int fs20toi(char *fs20, char **endptr);
+int  fs20toi(char *fs20, char **endptr);
 const char *itofs20(char *buf, int code, char *separator);
 
 /* USB Functions */
-int usb_connect(void);
-int usb_release(void);
-int usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool fexpectdata);
+int  usb_connect(void);
+int  usb_release(void);
+int  usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool fexpectdata);
 
 /* Helper Functions */
 void debug(int priority, const char *format, ...);
@@ -175,15 +193,20 @@ void createpidfile(const char *pidfile, pid_t pid);
 void removepidfile(const char *pidfile);
 void cleanup(int sig);
 void endfunc(int sig);
-int write_to_client(int socket_handle, const char *format, ...);
-void client_cmd_help(int socket_handle);
-int cmdcompare(const char * cs, const char * ct);
-int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle);
+int  write_to_client(int socket_handle, int flags, const char *format, ...);
+void client_cmd_help(int socket_handle, int flags);
+int  cmdcompare(const char * cs, const char * ct);
+char from_hex(char ch);
+char *url_decode(char *str);
+void request_header(int socket_handle, int response, const char *responsetext);
+void html_header(int socket_handle, const char *title);
+void html_footer(int socket_handle);
+int  handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle, int flags);
 
 /* TCP socket thread functions */
-int tcp_server_init(int port);
-int tcp_server_connect(int listen_sock, struct sockaddr_in *psock);
-int recbuffer(int s, void *buf, size_t len, int flags);
+int  tcp_server_init(int port);
+int  tcp_server_connect(int listen_sock, struct sockaddr_in *psock);
+int  recbuffer(int s, void *buf, size_t len, int flags);
 void tcp_server_handle_client_end(int rc, int client_fd);
 void *tcp_server_handle_client(void *arg);
 
@@ -247,6 +270,45 @@ char *stristr(const char *str1, const char *str2) {
 
 	return NULL;
 }
+
+/*
+ * Create a new string with [substr] being replaced by [replacement] in [string]
+ * Returns the new string, or NULL if out of memory.
+ * The caller is responsible for free the new string memory
+ */
+char *str_replace ( const char *string, const char *substr, const char *replacement )
+{
+	char *tok = NULL;
+	char *newstr = NULL;
+	char *oldstr = NULL;
+	char *head = NULL;
+
+	/* if either substr or replacement is NULL, simply duplicate string */
+	if ( substr == NULL || replacement == NULL ) {
+		return strdup (string);
+	}
+
+	newstr = strdup (string);
+	head = newstr;
+	while ( (tok = strstr ( head, substr ))) {
+		oldstr = newstr;
+		newstr = malloc ( strlen ( oldstr ) - strlen ( substr ) + strlen ( replacement ) + 1 );
+
+		if ( newstr == NULL ){
+			free (oldstr);
+			return NULL;
+		}
+		memcpy ( newstr, oldstr, tok - oldstr );
+		memcpy ( newstr + (tok - oldstr), replacement, strlen ( replacement ) );
+		memcpy ( newstr + (tok - oldstr) + strlen( replacement ), tok + strlen ( substr ), strlen ( oldstr ) - strlen ( substr ) - ( tok - oldstr ) );
+		memset ( newstr + strlen ( oldstr ) - strlen ( substr ) + strlen ( replacement ) , 0, 1 );
+
+		head = newstr + (tok - oldstr) + strlen( replacement );
+		free (oldstr);
+	}
+	return newstr;
+}
+
 
 /** * C++ version 0.4 char* style "itoa":
 	* Written by Lukás Chmela
@@ -602,7 +664,7 @@ void cleanup(int sig)
 	}
 	removepidfile(pidfile);
 	if( fDaemon ) {
-		debug(LOG_INFO, "Terminate program %s (%s) - %s", PROGNAME, VERSION, reason);
+		debug(LOG_INFO, "Terminate program %s v%s (build %s) - %s", PROGNAME, VERSION, BUILD, reason);
 	}
 }
 
@@ -621,17 +683,26 @@ void dummyfunc(int sig)
 {
 }
 
-int write_to_client(int socket_handle, const char *format, ...)
+int write_to_client(int socket_handle, int flags, const char *format, ...)
 {
 	va_list args;
 	char msg[MSG_BUFFER_MAXLEN];
+	char *sendmsg;
 	int rc=0;
 
 	va_start (args, format);
 	vsprintf (msg, format, args);
 	if( socket_handle != 0 ) {
 		pthread_mutex_lock(&mutex_socks);
-		rc = send(socket_handle, msg, strlen(msg), 0);
+		if( flags & HANDLE_INPUT_HTML ) {
+			if( (sendmsg = str_replace(msg, "\r\n", "<br />\r\n")) != NULL ) {
+				rc = send(socket_handle, sendmsg, strlen(sendmsg), 0);
+				free(sendmsg);
+			}
+		}
+		else {
+			rc = send(socket_handle, msg, strlen(msg), 0);
+		}
 		pthread_mutex_unlock(&mutex_socks);
 	}
 	else {
@@ -642,14 +713,15 @@ int write_to_client(int socket_handle, const char *format, ...)
 	return rc;
 }
 
-void client_cmd_help(int socket_handle)
+void client_cmd_help(int socket_handle, int flags)
 {
-	write_to_client(socket_handle,
+	write_to_client(socket_handle, flags,
 					 	"\r\n"
-					 	"%s (%s) help\r\n"
+					 	"%s v%s (build %s) help\r\n"
 						"\r\n"
-					, PROGNAME, VERSION);
-	write_to_client(socket_handle,
+					, PROGNAME, VERSION, BUILD);
+	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
+						"%s"
 						"Light Manager commands\r\n"
 						"    GET CLOCK         Read the current device date and time\r\n"
 						"    GET HOUSECODE     Read the current FS20 housecode\r\n"
@@ -659,8 +731,8 @@ void client_cmd_help(int socket_handle)
 						"    SET CLOCK [time]  Set the device clock to system time or to <time>\r\n"
 						"                      where time format is MMDDhhmm[[CC]YY][.ss]\r\n"
 						"\r\n"
-						);
-	write_to_client(socket_handle,
+						,(flags & HANDLE_INPUT_HTML)?"<pre>":"");
+	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
 						"Device commands\r\n"
 						"    FS20 addr cmd     Send a FS20 command where\r\n"
 						"                        adr  FS20 address using the format ggss (1111-4444)\r\n"
@@ -685,13 +757,15 @@ void client_cmd_help(int socket_handle)
 						"    SCENE scn         Activate scene <scn> (1-254)\r\n"
 						"\r\n"
 						);
-	write_to_client(socket_handle,
+	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
 						"System commands\r\n"
 						"    ? or HELP         Prints this help\r\n"
+						"    VERSION           Prints program name and version\r\n"
 						"    EXIT              Disconnect and exit server programm\r\n"
 						"    QUIT              Disconnect\r\n"
 						"    WAIT ms           Wait for <ms> milliseconds\r\n"
-						);
+						"%s"
+						,(flags & HANDLE_INPUT_HTML)?"</pre>":"");
 }
 
 
@@ -735,16 +809,69 @@ char *url_decode(char *str) {
 
 	return buf;
 }
+
+/* Writes a html request header to client using <socket_handle> */
+void request_header(int socket_handle, int response, const char *responsetext)
+{
+  	time_t now;
+  	struct tm * currenttime;
+	char buffer[50];
+
+    time(&now);
+    currenttime = gmtime(&now);
+    strftime (buffer,80,"%a %b %d %X %Y GMT",currenttime);
+
+	write_to_client(socket_handle, 0,
+		"HTTP/1.1 %d %s\r\n"
+		"Date: %s\r\n"
+		"Server: %s WEB %s (build %s)\r\n"
+		"Last-Modified: %s\r\n"
+		"Content-Language: %s\r\n"
+		"Cache-Control: no-store, no-cache, must-revalidate, post-check=0, pre-check=0\r\n"
+		"Pragma: no-cache\r\n"
+		"Connection: close\r\n"
+		"Content-Type: text/html\r\n"
+		"\r\n"
+		,response, responsetext
+		,buffer
+		,PROGNAME, VERSION, BUILD
+		,buffer
+		,"en");
+}
+
+/* Writes a html header to client using <socket_handle> */
+void html_header(int socket_handle, const char *title)
+{
+	write_to_client(socket_handle, 0,
+		"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\"\r\n"
+		"       \"http://www.w3.org/TR/html4/loose.dtd\">\r\n"
+		"<html>\r\n"
+		"<head>\r\n"
+		"<title>%s</title>\r\n"
+		"</head>\r\n"
+		"<body>\r\n"
+		,title);
+}
+
+/* Writes a html footer to client using <socket_handle> */
+void html_footer(int socket_handle)
+{
+		write_to_client(socket_handle, 0,
+			"</body>\r\n"
+			"</html>\r\n"
+			);
+}
+
 /* 	handle command input either via TCP socket or by a given string.
 	if socket_handle is 0, then results will be given via stdout
 	otherwise it wilkl be sent back via TCP to the socket client
 	returns:
-		 0: if success normal
-		-1: if success and client wants to quit
-		-2: if success and client wants to quit also server
-		-3: if sucesss http request
+		 0: successful, normal
+		-1: successful, client want to disconnect
+		-2: successful, client want to disconnect and quit the server
+		-3: sucesssful http request
 */
-int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle)
+int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle, int flags)
 {
 
 	static char usbcmd[8];
@@ -756,7 +883,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 	char *ptr;
 	bool fcmdok = true;
 
-
+	debug(LOG_DEBUG, "Handle Input '%s'", input);
 	if( stristr(input,"GET")==input && stristr(input,"HTTP/1.")!=NULL ) {
 		char *newinput;
 
@@ -768,36 +895,32 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 			if( stristr(input,"/cmd=") ) {
 				input = stristr(input,"/cmd=")+5;
 				if( (ptr = url_decode(input)) ) {
-					write_to_client(socket_handle,
-						"HTTP/1.1 %d OK\r\n"
-						"Server: %s/%s (Linux)\r\n"
-						"Content-Length: %d\r\n"
-						"Content-Language: %s\r\n"
-						"Connection: close\r\n"
-						"Content-Type: text/html\r\n"
-						,200
-						,PROGNAME, VERSION
-						,0
-						,"en");
-					handle_input(ptr, dev_handle, socket_handle);
+					request_header(socket_handle, 200, "OK");
+					html_header(socket_handle, "Lightmanager");
+					handle_input(ptr, dev_handle, socket_handle, HANDLE_INPUT_NOOK|HANDLE_INPUT_HTML);
+					html_footer(socket_handle);
 					free(ptr);
 					return -3;
 				}
 			}
 		}
-		write_to_client(socket_handle,
-			"HTTP/1.1 %d OK\r\n"
-			"Server: %s/%s (Linux)\r\n"
-			"Content-Length: %d\r\n"
-			"Content-Language: %s\r\n"
-			"Connection: close\r\n"
-			"Content-Type: text/html\r\n"
-			,400
-			,PROGNAME, VERSION
-			,0
-			,"en");
+		request_header(socket_handle, 400, "Bad Request");
+		html_header(socket_handle, "Error 400 - Bad Request");
+		write_to_client(socket_handle, HANDLE_INPUT_HTML,
+			"<h1>Error 400 - Bad Request</h1>\r\n"
+			"The request cannot be fulfilled due to bad syntax.\r\n"
+			"\r\n"
+			"Usage&colon; <pre>http&colon;//&lt;server&gt;/cmd=<span style=\"color:blue;\">command</span>[&amp;<span style=\"color:blue;\">command</span>[...]]</pre>\r\n"
+			"\r\n"
+			"For possible commands see help below\r\n"
+			"<pre>\r\n"
+			);
+		client_cmd_help(socket_handle, 0);
+		write_to_client(socket_handle, 0,"</pre>\r\n");
+		html_footer(socket_handle);
 		return -3;
 	}
+
 
 	debug(LOG_DEBUG, "Handle input '%s'", input);
 
@@ -816,8 +939,11 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 		ptr = strtok(command, tok_delimiter);
 
 		if( ptr != NULL ) {
-			if (cmdcompare(ptr, "H") == 0 || cmdcompare(ptr, "?") == 0) {
-				client_cmd_help(socket_handle);
+			if (cmdcompare(ptr, "HELP") == 0 || cmdcompare(ptr, "H") == 0 || cmdcompare(ptr, "?") == 0) {
+				client_cmd_help(socket_handle, flags);
+			}
+			else if (cmdcompare(ptr, "VERSION") == 0) {
+				write_to_client(socket_handle, flags, "%s v%s (build %s)\r\n", PROGNAME, VERSION, BUILD);
 			}
 			/* FS20 devices */
 			else if (cmdcompare(ptr, "FS20") == 0) {
@@ -853,7 +979,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								}
 								if (errno != 0 || dim_value < 0 || dim_value > 16) {
 									cmd = -2;
-									write_to_client(socket_handle, "FS20: Wrong dim level (must be within 0-16 or 0\%-100\%)\r\n");
+									write_to_client(socket_handle, flags, "ERROR - FS20: Wrong dim level (must be within 0-16 or 0\%-100\%)\r\n");
 									fcmdok = false;
 								}
 								else {
@@ -868,27 +994,27 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								usbcmd[4] = cmd;
 								usbcmd[6] = 0x03;
 								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-									write_to_client(socket_handle, "USB communication error\r\n");
+									write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
 									fcmdok = false;
 								}
 							}
 							else if (cmd == -1 ) {
-								write_to_client(socket_handle, "FS20: unknown <cmd> parameter '%s'\r\n", ptr);
+								write_to_client(socket_handle, flags, "ERROR - FS20: unknown <cmd> parameter '%s'\r\n", ptr);
 								fcmdok = false;
 							}
 						}
 						else {
-							write_to_client(socket_handle, "FS20: missing <cmd> parameter\r\n");
+							write_to_client(socket_handle, flags, "ERROR - FS20: missing <cmd> parameter\r\n");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, "FS20 %s: wrong <addr> parameter\r\n", ptr);
+						write_to_client(socket_handle, flags, "ERROR - FS20 %s: wrong <addr> parameter\r\n", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, "FS20: missing <addr> parameter\r\n");
+					write_to_client(socket_handle, flags, "ERROR - FS20: missing <addr> parameter\r\n");
 					fcmdok = false;
 				}
 		 	}
@@ -920,27 +1046,27 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								usbcmd[2] = 0x74;
 								usbcmd[3] = cmd;
 								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-									write_to_client(socket_handle, "USB communication error\r\n");
+									write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
 									fcmdok = false;
 								}
 							}
 							else {
-								write_to_client(socket_handle, "UNIROLL: wrong <cmd> parameter '%s'\r\n", ptr);
+								write_to_client(socket_handle, flags, "ERROR - UNIROLL: wrong <cmd> parameter '%s'\r\n", ptr);
 								fcmdok = false;
 							}
 						}
 						else {
-							write_to_client(socket_handle, "UNIROLL: missing <cmd> parameter\r\n");
+							write_to_client(socket_handle, flags, "ERROR - UNIROLL: missing <cmd> parameter\r\n");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, "UNIROLL %s: wrong <addr> parameter\r\n", ptr);
+						write_to_client(socket_handle, flags, "ERROR - UNIROLL %s: wrong <addr> parameter\r\n", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, "UNIROLL: missing <addr> parameter\r\n");
+					write_to_client(socket_handle, flags, "ERROR - UNIROLL: missing <addr> parameter\r\n");
 					fcmdok = false;
 				}
 		 	}
@@ -977,37 +1103,37 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 										usbcmd[2] = cmd;
 										usbcmd[3] = 0x06;
 										if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-											write_to_client(socket_handle, "USB communication error\r\n");
+											write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
 											fcmdok = false;
 										}
 									}
 									else {
-										write_to_client(socket_handle, "InterTechno: wrong <cmd> parameter '%s'\r\n", ptr);
+										write_to_client(socket_handle, flags, "ERROR - InterTechno: wrong <cmd> parameter '%s'\r\n", ptr);
 										fcmdok = false;
 									}
 								}
 								else {
-									write_to_client(socket_handle, "InterTechno: missing <cmd> parameter\r\n");
+									write_to_client(socket_handle, flags, "ERROR - InterTechno: missing <cmd> parameter\r\n");
 									fcmdok = false;
 								}
 							}
 							else {
-								write_to_client(socket_handle, "InterTechno: %s: <addr> parameter out of range (must be within 1 to 16)\r\n", ptr);
+								write_to_client(socket_handle, flags, "ERROR - InterTechno: %s: <addr> parameter out of range (must be within 1 to 16)\r\n", ptr);
 								fcmdok = false;
 							}
 						}
 						else {
-							write_to_client(socket_handle, "InterTechno: missing <addr> parameter\r\n");
+							write_to_client(socket_handle, flags, "ERROR - InterTechno: missing <addr> parameter\r\n");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, "InterTechno: <code> parameter out of range (must be within 'A' to 'P')\r\n");
+						write_to_client(socket_handle, flags, "ERROR - InterTechno: <code> parameter out of range (must be within 'A' to 'P')\r\n");
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, "InterTechno: missing <code> parameter\r\n");
+					write_to_client(socket_handle, flags, "ERROR - InterTechno: missing <code> parameter\r\n");
 					fcmdok = false;
 				}
 		 	}
@@ -1022,17 +1148,17 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 						usbcmd[0] = 0x0f;
 						usbcmd[1] = 0x01 * scene;
 						if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-							write_to_client(socket_handle, "USB communication error\r\n");
+							write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, "SCENE: parameter <s> out of range (must be within range 1-254)\r\n");
+						write_to_client(socket_handle, flags, "ERROR - SCENE: parameter <s> out of range (must be within range 1-254)\r\n");
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, "SCENE: missing parameter\r\n");
+					write_to_client(socket_handle, flags, "ERROR - SCENE: missing parameter\r\n");
 					fcmdok = false;
 				}
 		 	}
@@ -1047,7 +1173,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 
 						usbcmd[0] = 0x09;
 						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
-							write_to_client(socket_handle, "USB communication error\r\n");
+							write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
 							fcmdok = false;
 						}
 						/* ss mm hh dd MM ww yy 00 */
@@ -1058,28 +1184,28 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 						timeinfo.tm_mon  = usbcmd[4]-1;
 						timeinfo.tm_year = usbcmd[6] + 100;
 						mktime ( &timeinfo );
-						write_to_client(socket_handle, "%s\r", asctime(&timeinfo) );
+						write_to_client(socket_handle, flags, "%s\r", asctime(&timeinfo) );
 
 					} else if (cmdcompare(ptr, "TEMP") == 0 ) {
 						usbcmd[0] = 0x0c;
 						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
-							write_to_client(socket_handle, "USB communication error\r\n");
+							write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
 							fcmdok = false;
 						}
 						else if( usbcmd[0]==0xfd ) {
-							write_to_client(socket_handle, "%.1f\r\n", (float)usbcmd[1]/2);
+							write_to_client(socket_handle, flags, "%.1f%s\r\n", (float)usbcmd[1]/2, (flags & HANDLE_INPUT_HTML)?" &deg;C":"");
 						}
 					} else if (cmdcompare(ptr, "HOUSECODE") == 0 ) {
 						char buf[64];
-						write_to_client(socket_handle, "%s\r\n", itofs20(buf, housecode, NULL));
+						write_to_client(socket_handle, flags, "%s\r\n", itofs20(buf, housecode, NULL));
 					}
 					else {
-						write_to_client(socket_handle, "GET: unknown parameter '%s'\r\n", ptr);
+						write_to_client(socket_handle, flags, "ERROR - GET: unknown parameter '%s'\r\n", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, "GET: missing parameter\r\n");
+					write_to_client(socket_handle, flags, "ERROR - GET: missing parameter\r\n");
 					fcmdok = false;
 				}
 		 	}
@@ -1122,7 +1248,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 							        strptime(ptr, "%m%d%H%M%Y.%S", &timeinfo);
 									break;
 								default:
-									write_to_client(socket_handle, "SET CLOCK: wrong time format (use MMDDhhmm[[CC]YY][.ss])\r\n");
+									write_to_client(socket_handle, flags, "ERROR - SET CLOCK: wrong time format (use MMDDhhmm[[CC]YY][.ss])\r\n");
 									fcmdok = false;
 									cmd = -1;
 									break;
@@ -1153,7 +1279,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 							usbcmd[2] = 0x01;
 							usbcmd[3] = 0x02;
 							if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-								write_to_client(socket_handle, "USB communication error\r\n");
+								write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
 								fcmdok = false;
 							}
 				 		}
@@ -1167,22 +1293,22 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				 				housecode = newhc;
 				 			}
 				 			else {
-				 				write_to_client(socket_handle, "SET HOUSECODE: wrong paramater '%s'\r\n", ptr);
+				 				write_to_client(socket_handle, flags, "ERROR - SET HOUSECODE: wrong paramater '%s'\r\n", ptr);
 				 				fcmdok = false;
 				 			}
 						}
 						else {
-							write_to_client(socket_handle, "SET HOUSECODE: missing paramater\r\n");
+							write_to_client(socket_handle, flags, "ERROR - SET HOUSECODE: missing paramater\r\n");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, "SET: unknown parameter '%s'\r\n", ptr);
+						write_to_client(socket_handle, flags, "ERROR - SET: unknown parameter '%s'\r\n", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, "SET: missing parameter\r\n");
+					write_to_client(socket_handle, flags, "ERROR - SET: missing parameter\r\n");
 					fcmdok = false;
 				}
 			}
@@ -1196,7 +1322,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 					usleep(ms*1000L);
 				}
 				else {
-					write_to_client(socket_handle, "WAIT: missing parameter\r\n");
+					write_to_client(socket_handle, flags, "ERROR - WAIT: missing parameter\r\n");
 					fcmdok = false;
 				}
 		 	}
@@ -1209,14 +1335,14 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				return -2; //end
 			}
 			else {
-				write_to_client(socket_handle, "unknown command '%s'\r\n", ptr);
+				write_to_client(socket_handle, flags, "ERROR - unknown command '%s'\r\n", ptr);
 				fcmdok = false;
 			}
 		}
 	}
 
 	if( fcmdok ) {
-		write_to_client(socket_handle, "OK\r\n");
+		write_to_client(socket_handle, flags, "%s\r\n", (flags & HANDLE_INPUT_NOOK)?"":"OK");
 	}
 
 	return 0;
@@ -1293,14 +1419,17 @@ int recbuffer(int s, void *buf, size_t len, int flags)
 	memset(buf, 0, len);
 	str = (char *)buf;
 	slen = 0;
+	debug(LOG_DEBUG, "recbuffer(%d, %p, %d, %d) called", s, buf, len, flags);
 	while( (rc=recv(s, str, len, flags)) > 0) {
 		slen += rc;
 		if( rc>0 && *(str+rc-1)=='\r' || *(str+rc-1)=='\n' ) {
+			debug(LOG_DEBUG, "recbuffer() returning due to cr/lf: rc=%d", rc);
 			return slen;
 		}
 		str += rc;
 		// usleep( 50*1000L );
 	}
+	debug(LOG_DEBUG, "recbuffer() returning: rc=%d", rc);
 	return rc;
 }
 
@@ -1332,24 +1461,26 @@ void *tcp_server_handle_client(void *arg)
 
 	client_fd = (int)arg;
 
+	debug(LOG_DEBUG, "tcp_server_handle_client() thread started with client_fd = %d", client_fd);
 	while(true) {
 		memset(buf, 0, sizeof(buf));
 		rc = recbuffer(client_fd, buf, sizeof(buf), 0);
 		if ( rc <= 0 ) {
+			debug(LOG_DEBUG, "tcp_server_handle_client() thread will be end due to rc = %d", rc);
 			tcp_server_handle_client_end(rc, client_fd);
 			pthread_exit(NULL);
 		}
 		else {
-			rc = handle_input(trim(buf), dev_handle, client_fd);
+			rc = handle_input(trim(buf), dev_handle, client_fd, 0);
 			if ( rc < 0 ) {
 				if( rc > -3 ) {
-					write_to_client(client_fd, "bye\r\n");
+					write_to_client(client_fd, 0, "bye\r\n");
 				}
 				tcp_server_handle_client_end(rc, client_fd);
 				pthread_exit(NULL);
 			}
 			else {
-				if( write_to_client(client_fd, ">")<0 ) {
+				if( write_to_client(client_fd, 0, ">")<0 ) {
 					pthread_mutex_lock(&mutex_socks);
 					FD_CLR(client_fd, &socks);      /* remove dead client_fd */
 					pthread_mutex_unlock(&mutex_socks);
@@ -1371,7 +1502,7 @@ void *tcp_server_handle_client(void *arg)
 
 void prog_version(void)
 {
-	printf("%s (%s)\n", PROGNAME, VERSION);
+	printf("%s v%s (build %s)\n", PROGNAME, VERSION, BUILD);
 }
 
 void copyright(void)
@@ -1459,7 +1590,7 @@ int main(int argc, char * argv[]) {
 				break;
 			case 'g':
 				fDebug = true;
-				debug(LOG_DEBUG, "%s (%s)", PROGNAME, VERSION);
+				debug(LOG_DEBUG, "%s v%s (build %s)", PROGNAME, VERSION, BUILD);
 				debug(LOG_DEBUG, "Debug enabled");
 				break;
 			case 'h':
@@ -1497,7 +1628,7 @@ int main(int argc, char * argv[]) {
 
 	/* Starting as daemon if requested */
 	if( fDaemon ) {
-		debug(LOG_INFO, "Starting %s (%s) as daemon", PROGNAME, VERSION);
+		debug(LOG_INFO, "Starting %s v%s (build %s) as daemon", PROGNAME, VERSION, BUILD);
 		/* Fork off the parent process */
 		pid = fork();
 		exit_if(pid < 0);
@@ -1532,12 +1663,13 @@ int main(int argc, char * argv[]) {
 
 		/* If command line cmd is given, execute cmd and exit */
 		if( *cmdexec ) {
-			rc = handle_input(trim(cmdexec), dev_handle, 0);
+			rc = handle_input(trim(cmdexec), dev_handle, 0, HANDLE_INPUT_NOOK);
 		}
 		/* otherwise start TCP listing */
 		else {
 			/* open main TCP listening socket */
 			listen_fd = tcp_server_init(port);
+			debug(LOG_DEBUG, "tcp_server_init(%d) returns %d", port, listen_fd);
 			if( listen_fd >= 0 ) {
 				FD_ZERO(&socks);
 
@@ -1549,6 +1681,7 @@ int main(int argc, char * argv[]) {
 
 					/* Check TCP server listen port (client connect) */
 					client_fd = tcp_server_connect(listen_fd, &sock);
+					debug(LOG_DEBUG, "tcp_server_connect((%d,...) returns %d", listen_fd, client_fd);
 					if (client_fd >= 0) {
 						pthread_t thread_id;
 
