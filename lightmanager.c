@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 2.0.0015
+ Version     : 2.0.0016
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -71,6 +71,11 @@
 			         reads the current clock and temperature
 			+ Command VERSION added
 
+	2.00.0016
+			- GET TIME command sometimes return UTC instead of local time
+			* Be more verbose (helpfull for multiple commands)
+			+ New command VERBOSE/QUIET (default is: be VERBOSE)
+
 */
 
 #include <stdio.h>
@@ -94,7 +99,7 @@
 
 /* Program name and version */
 #define VERSION				"2.0"
-#define BUILD				"0015"
+#define BUILD				"0016"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -761,6 +766,8 @@ void client_cmd_help(int socket_handle, int flags)
 						"System commands\r\n"
 						"    ? or HELP         Prints this help\r\n"
 						"    VERSION           Prints program name and version\r\n"
+						"    VERBOSE           Be verbose (command and result output)"
+						"    QUIET             Be quiet (no command and result output)"
 						"    EXIT              Disconnect and exit server programm\r\n"
 						"    QUIT              Disconnect\r\n"
 						"    WAIT ms           Wait for <ms> milliseconds\r\n"
@@ -862,6 +869,21 @@ void html_footer(int socket_handle)
 			);
 }
 
+char *seterror(const char *format, ...)
+{
+	va_list args;
+	char *errormsg;
+
+	errormsg = malloc(strlen(format)+1024);
+	if ( errormsg != NULL ) {
+		va_start (args, format);
+		vsprintf (errormsg, format, args);
+		va_end (args);
+	}
+
+	return errormsg;
+}
+
 /* 	handle command input either via TCP socket or by a given string.
 	if socket_handle is 0, then results will be given via stdout
 	otherwise it wilkl be sent back via TCP to the socket client
@@ -881,7 +903,8 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 	char tok_delimiter[] = TOKEN_DELIMITER;
 	int i;
 	char *ptr;
-	bool fcmdok = true;
+	bool fcmdok;
+	bool quiet = false;
 
 	debug(LOG_DEBUG, "Handle Input '%s'", input);
 	if( stristr(input,"GET")==input && stristr(input,"HTTP/1.")!=NULL ) {
@@ -897,7 +920,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				if( (ptr = url_decode(input)) ) {
 					request_header(socket_handle, 200, "OK");
 					html_header(socket_handle, "Lightmanager");
-					handle_input(ptr, dev_handle, socket_handle, HANDLE_INPUT_NOOK|HANDLE_INPUT_HTML);
+					handle_input(ptr, dev_handle, socket_handle, HANDLE_INPUT_HTML);
 					html_footer(socket_handle);
 					free(ptr);
 					return -3;
@@ -932,8 +955,15 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 	i = 0;
 	while( i<MAX_CMDS && cmds[i]!=NULL ) {
 		char *command = cmds[i++];
+		char *cmdexec;
+		char *errormsg;
 
 		debug(LOG_DEBUG, "Handle cmd '%s'", command);
+
+		fcmdok = true;
+		cmdexec = strdup(command);
+		errormsg = NULL;
+
 		memset(usbcmd, 0, sizeof(usbcmd));
 
 		ptr = strtok(command, tok_delimiter);
@@ -944,6 +974,12 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 			}
 			else if (cmdcompare(ptr, "VERSION") == 0) {
 				write_to_client(socket_handle, flags, "%s v%s (build %s)\r\n", PROGNAME, VERSION, BUILD);
+			}
+			else if (cmdcompare(ptr, "VERBOSE") == 0) {
+				quiet = false;
+			}
+			else if (cmdcompare(ptr, "QUIET") == 0) {
+				quiet = true;
 			}
 			/* FS20 devices */
 			else if (cmdcompare(ptr, "FS20") == 0) {
@@ -979,7 +1015,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								}
 								if (errno != 0 || dim_value < 0 || dim_value > 16) {
 									cmd = -2;
-									write_to_client(socket_handle, flags, "ERROR - FS20: Wrong dim level (must be within 0-16 or 0\%-100\%)\r\n");
+									errormsg = seterror("Wrong dim level (must be within 0-16 or 0\%-100\%)");
 									fcmdok = false;
 								}
 								else {
@@ -994,27 +1030,27 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								usbcmd[4] = cmd;
 								usbcmd[6] = 0x03;
 								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-									write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
+									errormsg = seterror("USB communication error");
 									fcmdok = false;
 								}
 							}
 							else if (cmd == -1 ) {
-								write_to_client(socket_handle, flags, "ERROR - FS20: unknown <cmd> parameter '%s'\r\n", ptr);
+								errormsg = seterror("unknown <cmd> parameter '%s'", ptr);
 								fcmdok = false;
 							}
 						}
 						else {
-							write_to_client(socket_handle, flags, "ERROR - FS20: missing <cmd> parameter\r\n");
+							errormsg = seterror("missing <cmd> parameter");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, flags, "ERROR - FS20 %s: wrong <addr> parameter\r\n", ptr);
+						errormsg = seterror("%s: wrong <addr> parameter", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, flags, "ERROR - FS20: missing <addr> parameter\r\n");
+					errormsg = seterror("missing <addr> parameter");
 					fcmdok = false;
 				}
 		 	}
@@ -1046,27 +1082,27 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								usbcmd[2] = 0x74;
 								usbcmd[3] = cmd;
 								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-									write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
+									errormsg = seterror("USB communication error");
 									fcmdok = false;
 								}
 							}
 							else {
-								write_to_client(socket_handle, flags, "ERROR - UNIROLL: wrong <cmd> parameter '%s'\r\n", ptr);
+								errormsg = seterror("wrong <cmd> parameter '%s'", ptr);
 								fcmdok = false;
 							}
 						}
 						else {
-							write_to_client(socket_handle, flags, "ERROR - UNIROLL: missing <cmd> parameter\r\n");
+							errormsg = seterror("missing <cmd> parameter");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, flags, "ERROR - UNIROLL %s: wrong <addr> parameter\r\n", ptr);
+						errormsg = seterror("%s: wrong <addr> parameter", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, flags, "ERROR - UNIROLL: missing <addr> parameter\r\n");
+					errormsg = seterror("missing <addr> parameter");
 					fcmdok = false;
 				}
 		 	}
@@ -1103,37 +1139,37 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 										usbcmd[2] = cmd;
 										usbcmd[3] = 0x06;
 										if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-											write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
+											errormsg = seterror("USB communication error");
 											fcmdok = false;
 										}
 									}
 									else {
-										write_to_client(socket_handle, flags, "ERROR - InterTechno: wrong <cmd> parameter '%s'\r\n", ptr);
+										errormsg = seterror("wrong <cmd> parameter '%s'", ptr);
 										fcmdok = false;
 									}
 								}
 								else {
-									write_to_client(socket_handle, flags, "ERROR - InterTechno: missing <cmd> parameter\r\n");
+									errormsg = seterror("missing <cmd> parameter");
 									fcmdok = false;
 								}
 							}
 							else {
-								write_to_client(socket_handle, flags, "ERROR - InterTechno: %s: <addr> parameter out of range (must be within 1 to 16)\r\n", ptr);
+								errormsg = seterror("%s: <addr> parameter out of range (must be within 1 to 16)", ptr);
 								fcmdok = false;
 							}
 						}
 						else {
-							write_to_client(socket_handle, flags, "ERROR - InterTechno: missing <addr> parameter\r\n");
+							errormsg = seterror("missing <addr> parameter");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, flags, "ERROR - InterTechno: <code> parameter out of range (must be within 'A' to 'P')\r\n");
+						errormsg = seterror("<code> parameter out of range (must be within 'A' to 'P')");
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, flags, "ERROR - InterTechno: missing <code> parameter\r\n");
+					errormsg = seterror("missing <code> parameter");
 					fcmdok = false;
 				}
 		 	}
@@ -1148,17 +1184,17 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 						usbcmd[0] = 0x0f;
 						usbcmd[1] = 0x01 * scene;
 						if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-							write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
+							errormsg = seterror("USB communication error");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, flags, "ERROR - SCENE: parameter <s> out of range (must be within range 1-254)\r\n");
+						errormsg = seterror("parameter <s> out of range (must be within range 1-254)");
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, flags, "ERROR - SCENE: missing parameter\r\n");
+					errormsg = seterror("missing parameter");
 					fcmdok = false;
 				}
 		 	}
@@ -1173,7 +1209,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 
 						usbcmd[0] = 0x09;
 						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
-							write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
+							errormsg = seterror("USB communication error");
 							fcmdok = false;
 						}
 						/* ss mm hh dd MM ww yy 00 */
@@ -1183,13 +1219,15 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 						timeinfo.tm_mday = usbcmd[3];
 						timeinfo.tm_mon  = usbcmd[4]-1;
 						timeinfo.tm_year = usbcmd[6] + 100;
-						mktime ( &timeinfo );
-						write_to_client(socket_handle, flags, "%s\r", asctime(&timeinfo) );
+						timeinfo.tm_isdst= 0;
+
+						mktime(&timeinfo);
+						write_to_client(socket_handle, flags, "%s\r\n", asctime(&timeinfo) );
 
 					} else if (cmdcompare(ptr, "TEMP") == 0 ) {
 						usbcmd[0] = 0x0c;
 						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
-							write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
+							errormsg = seterror("USB communication error");
 							fcmdok = false;
 						}
 						else if( usbcmd[0]==0xfd ) {
@@ -1200,12 +1238,12 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 						write_to_client(socket_handle, flags, "%s\r\n", itofs20(buf, housecode, NULL));
 					}
 					else {
-						write_to_client(socket_handle, flags, "ERROR - GET: unknown parameter '%s'\r\n", ptr);
+						errormsg = seterror("unknown parameter '%s'", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, flags, "ERROR - GET: missing parameter\r\n");
+					errormsg = seterror("missing parameter");
 					fcmdok = false;
 				}
 		 	}
@@ -1248,7 +1286,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 							        strptime(ptr, "%m%d%H%M%Y.%S", &timeinfo);
 									break;
 								default:
-									write_to_client(socket_handle, flags, "ERROR - SET CLOCK: wrong time format (use MMDDhhmm[[CC]YY][.ss])\r\n");
+									errormsg = seterror("wrong time format (use MMDDhhmm[[CC]YY][.ss])");
 									fcmdok = false;
 									cmd = -1;
 									break;
@@ -1279,7 +1317,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 							usbcmd[2] = 0x01;
 							usbcmd[3] = 0x02;
 							if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
-								write_to_client(socket_handle, flags, "ERROR - USB communication error\r\n");
+								errormsg = seterror("USB communication error");
 								fcmdok = false;
 							}
 				 		}
@@ -1293,22 +1331,22 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				 				housecode = newhc;
 				 			}
 				 			else {
-				 				write_to_client(socket_handle, flags, "ERROR - SET HOUSECODE: wrong paramater '%s'\r\n", ptr);
+				 				errormsg = seterror("wrong paramater '%s'", ptr);
 				 				fcmdok = false;
 				 			}
 						}
 						else {
-							write_to_client(socket_handle, flags, "ERROR - SET HOUSECODE: missing paramater\r\n");
+							errormsg = seterror("missing paramater");
 							fcmdok = false;
 						}
 					}
 					else {
-						write_to_client(socket_handle, flags, "ERROR - SET: unknown parameter '%s'\r\n", ptr);
+						errormsg = seterror("unknown parameter '%s'", ptr);
 						fcmdok = false;
 					}
 				}
 				else {
-					write_to_client(socket_handle, flags, "ERROR - SET: missing parameter\r\n");
+					errormsg = seterror("missing parameter");
 					fcmdok = false;
 				}
 			}
@@ -1322,7 +1360,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 					usleep(ms*1000L);
 				}
 				else {
-					write_to_client(socket_handle, flags, "ERROR - WAIT: missing parameter\r\n");
+					errormsg = seterror("missing parameter");
 					fcmdok = false;
 				}
 		 	}
@@ -1335,14 +1373,24 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				return -2; //end
 			}
 			else {
-				write_to_client(socket_handle, flags, "ERROR - unknown command '%s'\r\n", ptr);
+				errormsg = seterror("unknown command '%s'", ptr);
 				fcmdok = false;
 			}
 		}
-	}
 
-	if( fcmdok ) {
-		write_to_client(socket_handle, flags, "%s\r\n", (flags & HANDLE_INPUT_NOOK)?"":"OK");
+		/* Output executed command */
+		if( !quiet && (flags & HANDLE_INPUT_NOOK)==0 ) {
+			/* Output status */
+			write_to_client(socket_handle, flags, "%s: %s%s\r\n", (cmdexec != NULL)?cmdexec:"<unknown>", (fcmdok)?"OK":"ERROR - ", (fcmdok)?"":((errormsg != NULL)?errormsg:"<unknown>") );
+		}
+		if( cmdexec != NULL ) {
+			free(cmdexec);
+			cmdexec = NULL;
+		}
+		if( errormsg != NULL ) {
+			free(errormsg);
+			errormsg = NULL;
+		}
 	}
 
 	return 0;
