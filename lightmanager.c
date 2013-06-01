@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 2.0.0016
+ Version     : 2.0.0017
  Copyright   : GPL
  Description : main file which creates server socket and sends commands to
  LightManager pro via USB
@@ -76,6 +76,8 @@
 			* Be more verbose (helpfull for multiple commands)
 			+ New command VERBOSE/QUIET (default is: be VERBOSE)
 
+	2.01.0017
+			- Running as daemon: Sometimes not responsible anymore, solved
 */
 
 #include <stdio.h>
@@ -98,8 +100,8 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"2.0"
-#define BUILD				"0016"
+#define VERSION				"2.1"
+#define BUILD				"0017"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -1732,6 +1734,7 @@ int main(int argc, char * argv[]) {
 					debug(LOG_DEBUG, "tcp_server_connect((%d,...) returns %d", listen_fd, client_fd);
 					if (client_fd >= 0) {
 						pthread_t thread_id;
+						pthread_attr_t attr;
 
 						debug(LOG_DEBUG, "Client connected from %s (handle=%d)", inet_ntoa(sock.sin_addr), client_fd);
 						pthread_mutex_lock(&mutex_socks);
@@ -1739,8 +1742,12 @@ int main(int argc, char * argv[]) {
 						pthread_mutex_unlock(&mutex_socks);
 
 						/* start thread for client command handling */
+						pthread_attr_init(&attr);
+						pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 						arg = (void *)client_fd;
-						pthread_create(&thread_id, NULL, tcp_server_handle_client, arg);
+						int ret = pthread_create(&thread_id, &attr, tcp_server_handle_client, arg);
+						debug(LOG_DEBUG, "client thread %sstarted (thread_id=%ul)", ret==0?"":"not ", thread_id);
+						pthread_attr_destroy(&attr);
 					}
 				}
 			}
@@ -1748,6 +1755,7 @@ int main(int argc, char * argv[]) {
 		}
 	}
 
+	debug(LOG_DEBUG, "main - SIGTERM");
 	cleanup(SIGTERM);
 	return rc;
 }
