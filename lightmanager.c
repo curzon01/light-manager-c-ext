@@ -78,6 +78,9 @@
 
 	2.01.0017
 			- Running as daemon: Sometimes not responsible anymore, solved
+
+	2.02.0018
+			+ InterTechno dim commands added (for more info see command "help")
 */
 
 #include <stdio.h>
@@ -100,8 +103,8 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"2.1"
-#define BUILD				"0017"
+#define VERSION				"2.2"
+#define BUILD				"0018"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -743,7 +746,7 @@ void client_cmd_help(int socket_handle, int flags)
 						"Device commands\r\n"
 						"    FS20 addr cmd     Send a FS20 command where\r\n"
 						"                        adr  FS20 address using the format ggss (1111-4444)\r\n"
-						"                        cmd  Command ON|OFF|TOGGLE|BRIGHT|+|DARK|-|<dim>\r\n"
+						"                        cmd  one of the following command:\r\n"
 						"                             ON|UP|OPEN      Switches ON or open a jalousie\r\n"
 						"                             OFF|DOWN|CLOSE  Switches OFF or close a jalousie\r\n"
 						"                             +|BRIGHT        regulate dimmer one step up\r\n"
@@ -754,10 +757,24 @@ void client_cmd_help(int socket_handle, int flags)
 						"                                             to 16 (max)\r\n"
 						"                                             for percentage dim use 0% (off) to\r\n"
 						"                                             100% (max)\r\n"
+						,(flags & HANDLE_INPUT_HTML)?"<pre>":"");
+	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
 						"    IT code addr cmd    Send an InterTechno command where\r\n"
-						"                        code  InterTechno housecode (A-P)\r\n"
-						"                        addr  InterTechno channel (1-16)\r\n"
-						"                        cmd   Command ON|OFF|TOGGLE\r\n"
+						"                        code InterTechno housecode (A-P)\r\n"
+						"                        addr InterTechno channel (1-16)\r\n"
+						"                        cmd  one of the following command\r\n"
+						"                             ON|UP|OPEN      Switches ON or open a jalousie\r\n"
+						"                             OFF|DOWN|CLOSE  Switches OFF or close a jalousie\r\n"
+						"                             +|BRIGHT        regulate dimmer one step up\r\n"
+						"                             +|DARK          regulate dimmer one step down\r\n"
+						"                             <dim>           is a absoulte or percentage dim\r\n"
+						"                                             value:\r\n"
+						"                                             for absolute dim use 0 (min=off)\r\n"
+						"                                             to 248 (max)\r\n"
+						"                                             for percentage dim use 0% (off) to\r\n"
+						"                                             100% (max)\r\n"
+						,(flags & HANDLE_INPUT_HTML)?"<pre>":"");
+	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
 						"    UNIROLL addr cmd  Send an Uniroll command where\r\n"
 						"                        adr  Uniroll jalousie number (1-100)\r\n"
 						"                        cmd  Command UP|+|DOWN|-|STOP\r\n"
@@ -768,8 +785,8 @@ void client_cmd_help(int socket_handle, int flags)
 						"System commands\r\n"
 						"    ? or HELP         Prints this help\r\n"
 						"    VERSION           Prints program name and version\r\n"
-						"    VERBOSE           Be verbose (command and result output)"
-						"    QUIET             Be quiet (no command and result output)"
+						"    VERBOSE           Be verbose (command and result output)\r\n"
+						"    QUIET             Be quiet (no command and result output)\r\n"
 						"    EXIT              Disconnect and exit server programm\r\n"
 						"    QUIT              Disconnect\r\n"
 						"    WAIT ms           Wait for <ms> milliseconds\r\n"
@@ -1128,18 +1145,42 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								/* next token: cmd */
 						 		ptr = strtok(NULL, tok_delimiter);
 						 		if( ptr!=NULL ) {
-									if (cmdcompare(ptr, "ON") == 0) {
+						 			int maincmd = 0x06; /*	0x06 default for all commands except dim
+						 									0x05 for dim, then cmd is the dim level (0-250) */
+									if (cmdcompare(ptr, "ON") == 0 || cmdcompare(ptr, "UP") == 0  || cmdcompare(ptr, "OPEN") == 0) {
 										cmd = 0x01;
-									} else if (cmdcompare(ptr, "OFF") == 0 ) {
+									} else if (cmdcompare(ptr, "OFF") == 0 || cmdcompare(ptr, "DOWN") == 0  || cmdcompare(ptr, "CLOSE") == 0) {
 										cmd = 0x00;
 									} else if (cmdcompare(ptr, "TOGGLE") == 0 ) {
 										cmd = 0x02;
+									} else if (cmdcompare(ptr, "BRIGHT") == 0 || cmdcompare(ptr, "+") == 0 ) {
+										cmd = 0x05;
+									} else if (cmdcompare(ptr, "DARK") == 0 || cmdcompare(ptr, "-") == 0 ) {
+										cmd = 0x06;
+									}
+									/* dimming case */
+									else {
+										errno = 0;
+										maincmd = 0x05;
+										int dim_value = strtol(ptr, NULL, 10);
+										if( *(ptr+strlen(ptr)-1)=='\%' ) {
+											dim_value = (248 * dim_value) / 100;
+										}
+										if (errno != 0 || dim_value < 0 || dim_value > 248) {
+											cmd = -2;
+											errormsg = seterror("Wrong dim level (must be within 0-248 or 0\%-100\%)");
+											fcmdok = false;
+										}
+										else {
+											cmd = 0x01 * dim_value;
+										}
 									}
 									if (cmd >= 0) {
 										usbcmd[0] = 0x05;
 										usbcmd[1] = code * 0x10 + (addr - 1);
 										usbcmd[2] = cmd;
-										usbcmd[3] = 0x06;
+										usbcmd[3] = maincmd;
+										usbcmd[4] = 0x01;
 										if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
 											errormsg = seterror("USB communication error");
 											fcmdok = false;
