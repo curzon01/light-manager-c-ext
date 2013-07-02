@@ -3,10 +3,13 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 2.0.0017
+ Version     : 2.03.0021
  Copyright   : GPL
- Description : main file which creates server socket and sends commands to
- LightManager pro via USB
+ Description : Access and control your jbmedia Light Manager Pro(+) from Linux
+               based on source from light-manager-c written by original author
+               with some enhancments.
+               Open source published on
+               http://code.google.com/p/light-manager-c-ext/
  ============================================================================
  */
 
@@ -81,6 +84,14 @@
 
 	2.02.0018
 			+ InterTechno dim commands added (for more info see command "help")
+
+	2.02.0019
+			* some add. comments within source code
+
+	2.03.0021
+			+ SET CLOCK|TIME new command parameter AUTO (or AUTOCORRECTION)
+			  for possible hour daylight saving time handling
+
 */
 
 #include <stdio.h>
@@ -103,8 +114,8 @@
 /* ======================================================================== */
 
 /* Program name and version */
-#define VERSION				"2.2"
-#define BUILD				"0018"
+#define VERSION				"2.3"
+#define BUILD				"0021"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -194,6 +205,8 @@ const char *itofs20(char *buf, int code, char *separator);
 int  usb_connect(void);
 int  usb_release(void);
 int  usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool fexpectdata);
+int  set_time(libusb_device_handle* dev_handle, struct tm *timeinfo);
+time_t get_time(libusb_device_handle* dev_handle);
 
 /* Helper Functions */
 void debug(int priority, const char *format, ...);
@@ -473,6 +486,8 @@ const char *itofs20(char *buf, int code, char *separator)
 /* ======================================================================== */
 /* USB Functions */
 /* ======================================================================== */
+
+/* Connects to a jbmedia Light Manager Pro(+) */
 int usb_connect(void)
 {
 	int rc;
@@ -520,6 +535,7 @@ int usb_connect(void)
 }
 
 
+/* Release connection to a jbmedia Light Manager Pro(+) */
 int usb_release(void)
 {
 	int rc;
@@ -537,17 +553,17 @@ int usb_release(void)
 	return EXIT_SUCCESS;
 }
 
-
+/* Send raw data to jbmedia Light Manager Pro(+) */
 int usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool fexpectdata)
 {
 	int retry;
 	int actual;
 	int ret;
-	int err = 0;
+	int err = EXIT_SUCCESS;
 
 	pthread_mutex_lock(&mutex_usb);
 	retry = USB_MAX_RETRY;
-	ret = -1;
+	ret = EXIT_FAILURE;
 	while( ret!=0 && retry>0 ) {
 		debug(LOG_DEBUG, "usb_send(0x01) (%02x %02x %02x %02x %02x %02x %02x %02x)", device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
 		ret = libusb_interrupt_transfer(dev_handle, (0x01 | LIBUSB_ENDPOINT_OUT), device_data, 8, &actual, USB_TIMEOUT);
@@ -563,7 +579,7 @@ int usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool 
 
 	if( fexpectdata ) {
 		retry = USB_MAX_RETRY;
-		ret = -1;
+		ret = EXIT_FAILURE;
 		while( ret!=0 && retry>0 ) {
 			debug(LOG_DEBUG, "usb_send(0x82) (%02x %02x %02x %02x %02x %02x %02x %02x)", device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
 			ret = libusb_interrupt_transfer(dev_handle, (0x82 | LIBUSB_ENDPOINT_IN), device_data, 8, &actual, USB_TIMEOUT);
@@ -581,6 +597,76 @@ int usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool 
 	pthread_mutex_unlock(&mutex_usb);
 
 	return err;
+}
+
+/* Set jbmedia Light Manager Pro(+) time to value within struct 'timeinfo' */
+int set_time(libusb_device_handle* dev_handle, struct tm *timeinfo)
+{
+	int i;
+	static char usbcmd[8];
+
+	memset(usbcmd, 0, sizeof(usbcmd));
+
+	usbcmd[0] = 0x08;
+	usbcmd[1] = timeinfo->tm_sec;
+	usbcmd[2] = timeinfo->tm_min;
+	usbcmd[3] = timeinfo->tm_hour;
+	usbcmd[4] = timeinfo->tm_mday;
+	usbcmd[5] = timeinfo->tm_mon+1;
+	usbcmd[6] = (timeinfo->tm_wday==0)?7:timeinfo->tm_wday;
+	usbcmd[7] = timeinfo->tm_year-100;
+	debug(LOG_DEBUG, "Device time set to %02d-%02d-%02d %02d:%02d:%02d", usbcmd[7], usbcmd[5], usbcmd[4], usbcmd[3], usbcmd[2], usbcmd[1]);
+
+	for(i=1; i<8;i++) {
+		usbcmd[i] = ((usbcmd[i]/10)*0x10) + (usbcmd[i]%10);
+	}
+	if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
+		return 0;
+	}
+
+	memset(usbcmd, 0, sizeof(usbcmd));
+	usbcmd[2] = 0x0d;
+	if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
+		return 0;
+	}
+
+	memset(usbcmd, 0, sizeof(usbcmd));
+	usbcmd[0] = 0x06;
+	usbcmd[1] = 0x02;
+	usbcmd[2] = 0x01;
+	usbcmd[3] = 0x02;
+	if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
+		return 0;
+	}
+}
+
+/* Get jbmedia Light Manager Pro(+) time, returns time_t on success otherwise -1 */
+time_t get_time(libusb_device_handle* dev_handle)
+{
+	static char usbcmd[8];
+	struct tm timeinfo;
+  	time_t now;
+  	struct tm * currenttime;
+
+	memset(usbcmd, 0, sizeof(usbcmd));
+	usbcmd[0] = 0x09;
+	if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != EXIT_SUCCESS ) {
+		return -1;
+	}
+	time(&now);
+	currenttime = localtime(&now);
+	memcpy(&timeinfo, currenttime, sizeof(timeinfo));
+
+	/* ss mm hh dd MM ww yy 00 */
+	timeinfo.tm_sec  = usbcmd[0];
+	timeinfo.tm_min  = usbcmd[1];
+	timeinfo.tm_hour = usbcmd[2];
+	timeinfo.tm_mday = usbcmd[3];
+	timeinfo.tm_mon  = usbcmd[4]-1;
+	timeinfo.tm_year = usbcmd[6] + 100;
+
+	debug(LOG_DEBUG, "Device timestamp returned %02d-%02d-%02d %02d:%02d:%02d", usbcmd[6], usbcmd[4], usbcmd[3], usbcmd[2], usbcmd[1], usbcmd[0]);
+	return mktime(&timeinfo);
 }
 
 
@@ -733,13 +819,15 @@ void client_cmd_help(int socket_handle, int flags)
 	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
 						"%s"
 						"Light Manager commands\r\n"
-						"    GET CLOCK         Read the current device date and time\r\n"
+						"    GET CLOCK|TIME    Read the current device date and time\r\n"
 						"    GET HOUSECODE     Read the current FS20 housecode\r\n"
 						"    GET TEMP          Read the current device temperature sensor\r\n"
 						"    SET HOUSECODE adr Set the FS20 housecode where\r\n"
 						"                        adr  FS20 housecode (11111111-44444444)\r\n"
-						"    SET CLOCK [time]  Set the device clock to system time or to <time>\r\n"
+						"    SET CLOCK|TIME [time|AUTO]\r\n"
+						"                      Set the device clock to system time or to <time>\r\n"
 						"                      where time format is MMDDhhmm[[CC]YY][.ss]\r\n"
+						"                      Use AUTO to avoid device automatic correction.\r\n"
 						"\r\n"
 						,(flags & HANDLE_INPUT_HTML)?"<pre>":"");
 	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
@@ -1048,7 +1136,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								usbcmd[3] = addr;
 								usbcmd[4] = cmd;
 								usbcmd[6] = 0x03;
-								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
 									errormsg = seterror("USB communication error");
 									fcmdok = false;
 								}
@@ -1100,7 +1188,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 								usbcmd[1] = addr-1;
 								usbcmd[2] = 0x74;
 								usbcmd[3] = cmd;
-								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+								if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
 									errormsg = seterror("USB communication error");
 									fcmdok = false;
 								}
@@ -1181,7 +1269,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 										usbcmd[2] = cmd;
 										usbcmd[3] = maincmd;
 										usbcmd[4] = 0x01;
-										if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+										if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
 											errormsg = seterror("USB communication error");
 											fcmdok = false;
 										}
@@ -1226,7 +1314,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 					if( scene >= 1 && scene<=254 ) {
 						usbcmd[0] = 0x0f;
 						usbcmd[1] = 0x01 * scene;
-						if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+						if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
 							errormsg = seterror("USB communication error");
 							fcmdok = false;
 						}
@@ -1248,28 +1336,21 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 		 		if( ptr!=NULL ) {
 					if (cmdcompare(ptr, "CLOCK") == 0 ||
 						cmdcompare(ptr, "TIME") == 0) {
-						struct tm timeinfo;
+						struct tm * currenttime;
+						time_t devtime;
 
-						usbcmd[0] = 0x09;
-						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
+						devtime = get_time(dev_handle);
+						if( devtime == -1 ) {
 							errormsg = seterror("USB communication error");
 							fcmdok = false;
 						}
-						/* ss mm hh dd MM ww yy 00 */
-						timeinfo.tm_sec  = usbcmd[0];
-						timeinfo.tm_min  = usbcmd[1];
-						timeinfo.tm_hour = usbcmd[2];
-						timeinfo.tm_mday = usbcmd[3];
-						timeinfo.tm_mon  = usbcmd[4]-1;
-						timeinfo.tm_year = usbcmd[6] + 100;
-						timeinfo.tm_isdst= 0;
-
-						mktime(&timeinfo);
-						write_to_client(socket_handle, flags, "%s\r\n", asctime(&timeinfo) );
-
-					} else if (cmdcompare(ptr, "TEMP") == 0 ) {
+						else {
+							currenttime = localtime(&devtime);
+							write_to_client(socket_handle, flags, "%s\r\n", asctime(currenttime) );
+						}
+					} else if ( cmdcompare(ptr, "TEMP") == 0 || cmdcompare(ptr, "TEMPERATURE") == 0 ) {
 						usbcmd[0] = 0x0c;
-						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != 0 ) {
+						if( usb_send(dev_handle, (unsigned char *)usbcmd, true) != EXIT_SUCCESS ) {
 							errormsg = seterror("USB communication error");
 							fcmdok = false;
 						}
@@ -1297,7 +1378,6 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 		 		if( ptr!=NULL ) {
 					if (cmdcompare(ptr, "CLOCK") == 0 ||
 						cmdcompare(ptr, "TIME") == 0) {
-						int cmd = 8;
 					  	time_t now;
 					  	struct tm * currenttime;
 						struct tm timeinfo;
@@ -1329,37 +1409,48 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 							        strptime(ptr, "%m%d%H%M%Y.%S", &timeinfo);
 									break;
 								default:
-									errormsg = seterror("wrong time format (use MMDDhhmm[[CC]YY][.ss])");
-									fcmdok = false;
-									cmd = -1;
+									if ( (strlen(ptr)==4 && cmdcompare(ptr, "AUTO") == 0) ||
+										 (strlen(ptr)==14 && cmdcompare(ptr, "AUTOCORRECTION") == 0) ) {
+
+										/* First check if some hour transition is done by device */
+										timeinfo.tm_sec = 0;
+							 			if( set_time(dev_handle, &timeinfo) != 0 ) {
+											errormsg = seterror("USB communication error");
+											fcmdok = false;
+										}
+										else {
+											/* Read back time set */
+											time_t devtime;
+											devtime = get_time(dev_handle);
+											if( devtime == -1 ) {
+												errormsg = seterror("USB communication error");
+												fcmdok = false;
+											}
+											else {
+												int diff;
+												/* Compare hour of time set with hour of time returned */
+												currenttime = localtime(&devtime);
+												diff = (timeinfo.tm_hour-currenttime->tm_hour);
+												debug(LOG_DEBUG, "Device timestamp hour diff: %d", diff );
+										        time(&now);
+										        currenttime = localtime(&now);
+												if( diff != 0 ) {
+											        currenttime->tm_hour += diff;
+													debug(LOG_DEBUG, "Hour corrected to %02d", currenttime->tm_hour);
+												}
+										        memcpy(&timeinfo, currenttime, sizeof(timeinfo));
+											}
+										}
+									}
+									else {
+										errormsg = seterror("wrong paramater, use time format 'MMDDhhmm[[CC]YY][.ss]' or keyword 'AUTO'");
+										fcmdok = false;
+									}
 									break;
 							}
 				 		}
-				 		if( cmd != -1 ) {
-				 			int i;
-							usbcmd[0] = cmd;
-							usbcmd[1] = timeinfo.tm_sec;
-							usbcmd[2] = timeinfo.tm_min;
-							usbcmd[3] = timeinfo.tm_hour;
-							usbcmd[4] = timeinfo.tm_mday;
-							usbcmd[5] = timeinfo.tm_mon+1;
-							usbcmd[6] = (timeinfo.tm_wday==0)?7:timeinfo.tm_wday;
-							usbcmd[7] = timeinfo.tm_year-100;
-							for(i=1; i<8;i++) {
-								usbcmd[i] = ((usbcmd[i]/10)*0x10) + (usbcmd[i]%10);
-							}
-							usb_send(dev_handle, (unsigned char *)usbcmd, false);
-
-							memset(usbcmd, 0, sizeof(usbcmd));
-							usbcmd[2] = 0x0d;
-							usb_send(dev_handle, (unsigned char *)usbcmd, false);
-
-							memset(usbcmd, 0, sizeof(usbcmd));
-							usbcmd[0] = 0x06;
-							usbcmd[1] = 0x02;
-							usbcmd[2] = 0x01;
-							usbcmd[3] = 0x02;
-							if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != 0 ) {
+				 		if( fcmdok == true ) {
+				 			if( set_time(dev_handle, &timeinfo) != 0 ) {
 								errormsg = seterror("USB communication error");
 								fcmdok = false;
 							}
@@ -1784,6 +1875,8 @@ int main(int argc, char * argv[]) {
 
 						/* start thread for client command handling */
 						pthread_attr_init(&attr);
+						/* we need to created detached threads (PTHREAD_CREATE_DETACHED),
+						   so its thread ID and other resources can be reused as soon as the thread terminates. */
 						pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 						arg = (void *)client_fd;
 						int ret = pthread_create(&thread_id, &attr, tcp_server_handle_client, arg);
