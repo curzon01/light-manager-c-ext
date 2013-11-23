@@ -3,7 +3,7 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 2.03.0021
+ Version     : 2.03.0022
  Copyright   : GPL
  Description : Access and control your jbmedia Light Manager Pro(+) from Linux
                based on source from light-manager-c written by original author
@@ -91,6 +91,13 @@
 	2.03.0021
 			+ SET CLOCK|TIME new command parameter AUTO (or AUTOCORRECTION)
 			  for possible hour daylight saving time handling
+	
+	2.03.0022
+			- Fixed issues:
+			  - http://code.google.com/p/light-manager-c-ext/issues/detail?id=3
+			  - http://code.google.com/p/light-manager-c-ext/issues/detail?id=4
+			  - http://code.google.com/p/light-manager-c-ext/issues/detail?id=5
+			  
 
 */
 
@@ -115,7 +122,7 @@
 
 /* Program name and version */
 #define VERSION				"2.3"
-#define BUILD				"0021"
+#define BUILD				"0022"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -506,7 +513,7 @@ int usb_connect(void)
 
 	dev_handle = libusb_open_device_with_vid_pid(usbContext, LM_VENDOR_ID, LM_PRODUCT_ID); /* VendorID and ProductID in decimal */
 	if (dev_handle == NULL ) {
-		debug(LOG_DEBUG, "Cannot open USB device (vendor 0x%04x, product 0x%04x)", LM_VENDOR_ID, LM_PRODUCT_ID);
+		debug(LOG_ERR, "Cannot open USB device (vendor 0x%04x, product 0x%04x)", LM_VENDOR_ID, LM_PRODUCT_ID);
 		libusb_exit(usbContext);
 		pthread_mutex_unlock(&mutex_usb);
 		return EXIT_FAILURE;
@@ -1635,38 +1642,35 @@ void *tcp_server_handle_client(void *arg)
  * in arg: Client socket filedescriptor
  */
 {
-	int client_fd;
 	char buf[INPUT_BUFFER_MAXLEN];
 	int buflen;
 	int rc;
 	int wfd;
 
-	client_fd = (int)arg;
-
-	debug(LOG_DEBUG, "tcp_server_handle_client() thread started with client_fd = %d", client_fd);
+	debug(LOG_DEBUG, "tcp_server_handle_client() thread started with client_fd = %d", (int)arg);
 	while(true) {
 		memset(buf, 0, sizeof(buf));
-		rc = recbuffer(client_fd, buf, sizeof(buf), 0);
+		rc = recbuffer((int)arg, buf, sizeof(buf), 0);
 		if ( rc <= 0 ) {
 			debug(LOG_DEBUG, "tcp_server_handle_client() thread will be end due to rc = %d", rc);
-			tcp_server_handle_client_end(rc, client_fd);
+			tcp_server_handle_client_end(rc, (int)arg);
 			pthread_exit(NULL);
 		}
 		else {
-			rc = handle_input(trim(buf), dev_handle, client_fd, 0);
+			rc = handle_input(trim(buf), dev_handle, (int)arg, 0);
 			if ( rc < 0 ) {
 				if( rc > -3 ) {
-					write_to_client(client_fd, 0, "bye\r\n");
+					write_to_client((int)arg, 0, "bye\r\n");
 				}
-				tcp_server_handle_client_end(rc, client_fd);
+				tcp_server_handle_client_end(rc, (int)arg);
 				pthread_exit(NULL);
 			}
 			else {
-				if( write_to_client(client_fd, 0, ">")<0 ) {
+				if( write_to_client((int)arg, 0, ">")<0 ) {
 					pthread_mutex_lock(&mutex_socks);
-					FD_CLR(client_fd, &socks);      /* remove dead client_fd */
+					FD_CLR((int)arg, &socks);      /* remove dead client_fd */
 					pthread_mutex_unlock(&mutex_socks);
-					close(client_fd);
+					close((int)arg);
 					pthread_exit(NULL);
 				}
 			}
@@ -1859,7 +1863,6 @@ int main(int argc, char * argv[]) {
 				while (true) {
 					struct sockaddr_in sock;
 					int client_fd;
-					void *arg;
 
 					/* Check TCP server listen port (client connect) */
 					client_fd = tcp_server_connect(listen_fd, &sock);
@@ -1878,8 +1881,7 @@ int main(int argc, char * argv[]) {
 						/* we need to created detached threads (PTHREAD_CREATE_DETACHED),
 						   so its thread ID and other resources can be reused as soon as the thread terminates. */
 						pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-						arg = (void *)client_fd;
-						int ret = pthread_create(&thread_id, &attr, tcp_server_handle_client, arg);
+						int ret = pthread_create(&thread_id, &attr, tcp_server_handle_client, (void *)client_fd);
 						debug(LOG_DEBUG, "client thread %sstarted (thread_id=%ul)", ret==0?"":"not ", thread_id);
 						pthread_attr_destroy(&attr);
 					}

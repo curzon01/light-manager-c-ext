@@ -1,6 +1,6 @@
 CC=gcc
 CFLAGS=
-LDFLAGS=-lusb-1.0
+LDFLAGS=-lpthread -lusb-1.0
 
 all: lightmanager
 
