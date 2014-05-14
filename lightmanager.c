@@ -3,11 +3,12 @@
  Name        : lightmanager.c
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
- Version     : 2.03.0022
+               neckerich <neckerich@gmail.com>
+ Version     : 2.03.0026
  Copyright   : GPL
  Description : Access and control your jbmedia Light Manager Pro(+) from Linux
                based on source from light-manager-c written by original author
-               with some enhancments.
+               with some enhancements.
                Open source published on
                http://code.google.com/p/light-manager-c-ext/
  ============================================================================
@@ -16,7 +17,7 @@
 /*
 	Revision history of lightmanager.c
 
-	Legende:
+	Legend:
 	+ New/Add
 	- Bugfix
 	* Change
@@ -50,7 +51,7 @@
 
 	1.02.0011
 			+ Added parameter -a (listen for address)
-			* additonal log program exit errors to stderr (even output is set to syslog)
+			* additional log program exit errors to stderr (even output is set to syslog)
 			- Segmentation fault on ubs_connect when no device is connected
 			- Segmentation fault on TCP command help output
 
@@ -76,11 +77,11 @@
 
 	2.00.0016
 			- GET TIME command sometimes return UTC instead of local time
-			* Be more verbose (helpfull for multiple commands)
+			* Be more verbose (helpful for multiple commands)
 			+ New command VERBOSE/QUIET (default is: be VERBOSE)
 
 	2.01.0017
-			- Running as daemon: Sometimes not responsible anymore, solved
+			- Running as daemon: Sometimes not responsible any more, solved
 
 	2.02.0018
 			+ InterTechno dim commands added (for more info see command "help")
@@ -97,7 +98,15 @@
 			  - http://code.google.com/p/light-manager-c-ext/issues/detail?id=3
 			  - http://code.google.com/p/light-manager-c-ext/issues/detail?id=4
 			  - http://code.google.com/p/light-manager-c-ext/issues/detail?id=5
-			  
+	
+	2.03.0025
+			+ Add support for IKEA Koppla devices (actuators 'IKR 202' and dimmers 'IKR 203')
+			  - http://code.google.com/p/light-manager-c-ext/issues/detail?id=6
+			+ InterTechno new command parameter LEARN for code learning devices and new command
+			  parameter DIP for standard devices with DIP-switches
+			 
+	2.03.0026
+			- Fixed dimming levels for IKEA Koppla dimmers 'IKR 203'
 
 */
 
@@ -122,7 +131,7 @@
 
 /* Program name and version */
 #define VERSION				"2.3"
-#define BUILD				"0022"
+#define BUILD				"0026"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -162,8 +171,8 @@ if(expr) { \
 #define DEF_PIDFILE		"/var/run/lightmanager.pid"
 
 
-/* Several output flags for handle_input() and subfunctions */
-#define HANDLE_INPUT_NOOK	1	// SET if the additional successful "OK" at the end of a command will be suppressed
+/* Several output flags for handle_input() and sub-functions */
+#define HANDLE_INPUT_NOOK	0   // SET to '1' if the additional successful "OK" at the end of a command will be suppressed
 #define HANDLE_INPUT_HTML	2	// SET if output should be in HTML format
 
 
@@ -391,7 +400,7 @@ char *ltrim(char *const s)
 	return s;
 }
 
-/* Remove trailing whitespaces */
+/* Remove trailing white-spaces */
 char *rtrim(char *const s)
 {
 	size_t len;
@@ -411,7 +420,7 @@ char *rtrim(char *const s)
 	return s;
 }
 
-/* Remove leading and trailing whitespaces */
+/* Remove leading and trailing white-spaces */
 char *trim(char *const s)
 {
 	rtrim(s);
@@ -574,7 +583,7 @@ int usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool 
 	while( ret!=0 && retry>0 ) {
 		debug(LOG_DEBUG, "usb_send(0x01) (%02x %02x %02x %02x %02x %02x %02x %02x)", device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
 		ret = libusb_interrupt_transfer(dev_handle, (0x01 | LIBUSB_ENDPOINT_OUT), device_data, 8, &actual, USB_TIMEOUT);
-		debug(LOG_DEBUG, "usb_send(0x01) transfered: %d, returns %d (%02x %02x %02x %02x %02x %02x %02x %02x)", actual, ret, device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
+		debug(LOG_DEBUG, "usb_send(0x01) transferred: %d, returns %d (%02x %02x %02x %02x %02x %02x %02x %02x)", actual, ret, device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
 		retry--;
 		if( ret!=0 && retry>0 ) {
 			usleep( USB_WAIT_ON_ERROR*1000L );
@@ -590,7 +599,7 @@ int usb_send(libusb_device_handle* dev_handle, unsigned char* device_data, bool 
 		while( ret!=0 && retry>0 ) {
 			debug(LOG_DEBUG, "usb_send(0x82) (%02x %02x %02x %02x %02x %02x %02x %02x)", device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
 			ret = libusb_interrupt_transfer(dev_handle, (0x82 | LIBUSB_ENDPOINT_IN), device_data, 8, &actual, USB_TIMEOUT);
-			debug(LOG_DEBUG, "usb_send(0x82) transfered: %d, returns %d (%02x %02x %02x %02x %02x %02x %02x %02x)", actual, ret, device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
+			debug(LOG_DEBUG, "usb_send(0x82) transferred: %d, returns %d (%02x %02x %02x %02x %02x %02x %02x %02x)", actual, ret, device_data[0], device_data[1], device_data[2], device_data[3], device_data[4], device_data[5], device_data[6], device_data[7] );
 			retry--;
 			if( ret!=0 && retry>0 ) {
 				usleep( USB_WAIT_ON_ERROR*1000L );
@@ -700,7 +709,7 @@ void debug(int priority, const char *format, ...)
 	else {
 		if( fsyslog ) {
 			vsyslog(priority, format, args);
-			/* Additonal output errors to stderr */
+			/* Additional output errors to stderr */
 			if( priority == LOG_ERR ) {
 				vfprintf(stderr, format, args);
 				fputs("\n", stdout);
@@ -829,7 +838,7 @@ void client_cmd_help(int socket_handle, int flags)
 						"    GET CLOCK|TIME    Read the current device date and time\r\n"
 						"    GET HOUSECODE     Read the current FS20 housecode\r\n"
 						"    GET TEMP          Read the current device temperature sensor\r\n"
-						"    SET HOUSECODE adr Set the FS20 housecode where\r\n"
+						"    SET HOUSECODE addr Set the FS20 housecode where\r\n"
 						"                        adr  FS20 housecode (11111111-44444444)\r\n"
 						"    SET CLOCK|TIME [time|AUTO]\r\n"
 						"                      Set the device clock to system time or to <time>\r\n"
@@ -846,7 +855,7 @@ void client_cmd_help(int socket_handle, int flags)
 						"                             OFF|DOWN|CLOSE  Switches OFF or close a jalousie\r\n"
 						"                             +|BRIGHT        regulate dimmer one step up\r\n"
 						"                             +|DARK          regulate dimmer one step down\r\n"
-						"                             <dim>           is a absoulte or percentage dim\r\n"
+						"                             <dim>           is a absolute or percentage dim\r\n"
 						"                                             value:\r\n"
 						"                                             for absolute dim use 0 (min=off)\r\n"
 						"                                             to 16 (max)\r\n"
@@ -854,20 +863,39 @@ void client_cmd_help(int socket_handle, int flags)
 						"                                             100% (max)\r\n"
 						,(flags & HANDLE_INPUT_HTML)?"<pre>":"");
 	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
-						"    IT code addr cmd    Send an InterTechno command where\r\n"
-						"                        code InterTechno housecode (A-P)\r\n"
-						"                        addr InterTechno channel (1-16)\r\n"
-						"                        cmd  one of the following command\r\n"
-						"                             ON|UP|OPEN      Switches ON or open a jalousie\r\n"
-						"                             OFF|DOWN|CLOSE  Switches OFF or close a jalousie\r\n"
+						"    IT code addr learn cmd    Send an InterTechno command where\r\n"
+						"                               code InterTechno housecode (A-P)\r\n"
+						"                               addr InterTechno channel (1-16)\r\n"
+						"                               learn one of the following commands\r\n"
+						"                                   LEARN       for InterTechno code learning devices\r\n"	
+						"                                   DIP         for InterTechno standard devices with\r\n"
+						"                                               DIP-switches\r\n"
+						"                               cmd  one of the following command\r\n"
+						"                                    ON|UP|OPEN     Switches ON or open a jalousie\r\n"
+						"                                    OFF|DOWN|CLOSE Switches OFF or close a jalousie\r\n"
+						"                                    +|BRIGHT       regulate dimmer one step up\r\n"
+						"                                    +|DARK         regulate dimmer one step down\r\n"
+						"                                    <dim>          is a absolute or percentage dim\r\n"
+						"                                                   value:\r\n"
+						"                                                   for absolute dim use 0 (min=off)\r\n"
+						"                                                   to 248 (max)\r\n"
+						"                                                   for percentage dim use 0% (off) to\r\n"
+						"                                                   100% (max) in steps of 6,25%\r\n"
+						,(flags & HANDLE_INPUT_HTML)?"<pre>":"");
+	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
+						"    IKEA code addr cmd  Send an IKEA Koppla command where\r\n"
+						"                          code IKEA Koppla systemcode (1-16)\r\n"
+						"                          addr IKEA Koppla channel (1-10)\r\n"
+						"                          cmd  one of the following commands\r\n"
+						"                             ON|UP           Switches ON = dimming level 100%\r\n"
+						"                             OFF|DOWN        Switches OFF = dimming level 0%\r\n"
 						"                             +|BRIGHT        regulate dimmer one step up\r\n"
 						"                             +|DARK          regulate dimmer one step down\r\n"
-						"                             <dim>           is a absoulte or percentage dim\r\n"
-						"                                             value:\r\n"
-						"                                             for absolute dim use 0 (min=off)\r\n"
-						"                                             to 248 (max)\r\n"
-						"                                             for percentage dim use 0% (off) to\r\n"
-						"                                             100% (max)\r\n"
+						"                             <dim>           is a percentage dim value:\r\n"
+						"                                             for percentage dim use 0% (min/off) to\r\n"
+						"                                             90% (max/on) in steps of 10%\r\n"
+						"                             +|FAST|INSTANT  regulate dimmer for fast dimming mode\r\n"
+						"                             +|SLOW|GRADUAL  regulate dimmer for slow dimming mode\r\n"
 						,(flags & HANDLE_INPUT_HTML)?"<pre>":"");
 	write_to_client(socket_handle, flags & ~HANDLE_INPUT_HTML,
 						"    UNIROLL addr cmd  Send an Uniroll command where\r\n"
@@ -882,7 +910,7 @@ void client_cmd_help(int socket_handle, int flags)
 						"    VERSION           Prints program name and version\r\n"
 						"    VERBOSE           Be verbose (command and result output)\r\n"
 						"    QUIET             Be quiet (no command and result output)\r\n"
-						"    EXIT              Disconnect and exit server programm\r\n"
+						"    EXIT              Disconnect and exit server program\r\n"
 						"    QUIT              Disconnect\r\n"
 						"    WAIT ms           Wait for <ms> milliseconds\r\n"
 						"%s"
@@ -1000,12 +1028,12 @@ char *seterror(const char *format, ...)
 
 /* 	handle command input either via TCP socket or by a given string.
 	if socket_handle is 0, then results will be given via stdout
-	otherwise it wilkl be sent back via TCP to the socket client
+	otherwise it will be sent back via TCP to the socket client
 	returns:
 		 0: successful, normal
 		-1: successful, client want to disconnect
 		-2: successful, client want to disconnect and quit the server
-		-3: sucesssful http request
+		-3: successful http request
 */
 int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handle, int flags)
 {
@@ -1220,8 +1248,8 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 					fcmdok = false;
 				}
 		 	}
-			/* InterTechno devices */
-			else if (cmdcompare(ptr, "IT") == 0 || cmdcompare(ptr, "InterTechno") == 0) {
+			/* IKEA devices */
+			else if (cmdcompare(ptr, "IKEA") == 0 || cmdcompare(ptr, "KOPPLA") == 0) {
 				int code;
 				int addr;
 				int cmd = -1;
@@ -1229,53 +1257,66 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				/* next token: code */
 		 		ptr = strtok(NULL, tok_delimiter);
 		 		if( ptr!=NULL ) {
-		 			if( toupper(*ptr)>='A' && toupper(*ptr)<='Z' ) {
-		 				code = toupper(*ptr) - 'A';
-						/* next token: addr */
+					errno = 0;
+					int code = strtol(ptr, NULL, 10);
+						code--;
+						if(errno == 0 && code >= 0 && code <= 15) {
+		 				/* next token: addr */
 				 		ptr = strtok(NULL, tok_delimiter);
 				 		if( ptr!=NULL ) {
 							errno = 0;
 							int addr = strtol(ptr, NULL, 10);
-							if (errno == 0 && addr >=1 && addr <= 16) {
+							if (errno == 0 && addr >= 1 && addr <= 10) {
+								if (addr == 10){
+									addr = 0;
+								}
 								/* next token: cmd */
 						 		ptr = strtok(NULL, tok_delimiter);
 						 		if( ptr!=NULL ) {
-						 			int maincmd = 0x06; /*	0x06 default for all commands except dim
-						 									0x05 for dim, then cmd is the dim level (0-250) */
-									if (cmdcompare(ptr, "ON") == 0 || cmdcompare(ptr, "UP") == 0  || cmdcompare(ptr, "OPEN") == 0) {
-										cmd = 0x01;
-									} else if (cmdcompare(ptr, "OFF") == 0 || cmdcompare(ptr, "DOWN") == 0  || cmdcompare(ptr, "CLOSE") == 0) {
-										cmd = 0x00;
+						 			int maincmd = 0x00;
+									if (cmdcompare(ptr, "ON") == 0 || cmdcompare(ptr, "UP") == 0 ) {
+										cmd = 0x30;
+									} else if (cmdcompare(ptr, "OFF") == 0 || cmdcompare(ptr, "DOWN") == 0 ) {
+										cmd = 0x3A;
 									} else if (cmdcompare(ptr, "TOGGLE") == 0 ) {
-										cmd = 0x02;
+										cmd = 0x1F;
 									} else if (cmdcompare(ptr, "BRIGHT") == 0 || cmdcompare(ptr, "+") == 0 ) {
-										cmd = 0x05;
+										cmd = 0x00;
 									} else if (cmdcompare(ptr, "DARK") == 0 || cmdcompare(ptr, "-") == 0 ) {
-										cmd = 0x06;
+										cmd = 0x40;
+									} else if (cmdcompare(ptr, "SLOW") == 0  || cmdcompare(ptr, "GRADUAL") == 0 ){
+										cmd = 0x30; // command for slow dimming mode (gradual dimming)
+									} else if (cmdcompare(ptr, "FAST") == 0  || cmdcompare(ptr, "INSTANT") == 0 ){
+										cmd = 0x10; // command for fast dimming mode (instant dimming)
 									}
 									/* dimming case */
-									else {
+									/* next token: dimming value */ // dim level 0-90% in steps of 10%
+									ptr = strtok(NULL, tok_delimiter);
+									if( ptr!=NULL ) {
 										errno = 0;
-										maincmd = 0x05;
 										int dim_value = strtol(ptr, NULL, 10);
-										if( *(ptr+strlen(ptr)-1)=='\%' ) {
-											dim_value = (248 * dim_value) / 100;
-										}
-										if (errno != 0 || dim_value < 0 || dim_value > 248) {
-											cmd = -2;
-											errormsg = seterror("Wrong dim level (must be within 0-248 or 0\%-100\%)");
-											fcmdok = false;
-										}
-										else {
-											cmd = 0x01 * dim_value;
-										}
+											if( *(ptr+strlen(ptr)-1)=='\%' ) {
+												dim_value = (10 * dim_value) / 100;
+												printf("DimValue is :", dim_value);
+											}
+											if (errno != 0 || dim_value < 0 || dim_value > 9) { //if (errno != 0 || dim_value < 0 || dim_value > 10) {
+													cmd = -2;
+													errormsg = seterror("Wrong dim level (must be within 0-90\%)");
+													fcmdok = false;
+											}
+											if (dim_value == 9) { // ON = Level 9 or 90% 
+												dim_value = 0x00; // Dim value for completely ON
+											} else if (dim_value == 0) { // OFF = Level 0 or 0%
+												dim_value = 0x0A;  // Dim value for completely OFF
+											}
+											
+											cmd = cmd * 0x01 + dim_value;
 									}
 									if (cmd >= 0) {
-										usbcmd[0] = 0x05;
-										usbcmd[1] = code * 0x10 + (addr - 1);
+										usbcmd[0] = 0x13;
+										usbcmd[1] = code  * 0x10 + addr;
 										usbcmd[2] = cmd;
-										usbcmd[3] = maincmd;
-										usbcmd[4] = 0x01;
+										usbcmd[3] = 0x02;
 										if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
 											errormsg = seterror("USB communication error");
 											fcmdok = false;
@@ -1291,6 +1332,112 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 									fcmdok = false;
 								}
 							}
+							else {
+								errormsg = seterror("%s: <addr> parameter out of range (must be within 1 to 10)", ptr);
+								fcmdok = false;
+							}
+						}
+						else {
+							errormsg = seterror("missing <addr> parameter");
+							fcmdok = false;
+						}
+					}
+					else {
+						errormsg = seterror("<code> parameter out of range (must be within '1' to '16')");
+						fcmdok = false;
+					}
+				}
+				else {
+					errormsg = seterror("missing <code> parameter");
+					fcmdok = false;
+				}
+		 	}
+			/* InterTechno devices */
+			else if (cmdcompare(ptr, "IT") == 0 || cmdcompare(ptr, "InterTechno") == 0) {
+				int code;
+				int addr;
+				int learn;
+				int cmd = -1;
+
+				/* next token: code */
+		 		ptr = strtok(NULL, tok_delimiter);
+		 		if( ptr!=NULL ) {
+		 			if( toupper(*ptr)>='A' && toupper(*ptr)<='Z' ) {
+		 				code = toupper(*ptr) - 'A';
+						/* next token: addr */
+				 		ptr = strtok(NULL, tok_delimiter);
+				 		if( ptr!=NULL ) {
+							errno = 0;
+							int addr = strtol(ptr, NULL, 10);
+							if (errno == 0 && addr >=1 && addr <= 16) {
+								/* next token: learn */
+						 		ptr = strtok(NULL, tok_delimiter);
+						 		if( ptr!=NULL ) {
+									errno = 0;
+									if (cmdcompare(ptr, "LEARN") == 0 ) {
+										learn = 0x01;
+									} else if (cmdcompare(ptr, "DIP") == 0 ) {
+										learn = 0x00;
+									}
+										/* next token: cmd */
+										ptr = strtok(NULL, tok_delimiter);
+										if( ptr!=NULL ) {
+											int maincmd = 0x06; /*	0x06 default for all commands except dim
+																	0x05 for dim, then cmd is the dim level (0-250) */
+											if (cmdcompare(ptr, "ON") == 0 || cmdcompare(ptr, "UP") == 0  || cmdcompare(ptr, "OPEN") == 0) {
+												cmd = 0x01;
+											} else if (cmdcompare(ptr, "OFF") == 0 || cmdcompare(ptr, "DOWN") == 0  || cmdcompare(ptr, "CLOSE") == 0) {
+												cmd = 0x00;
+											} else if (cmdcompare(ptr, "TOGGLE") == 0 ) {
+												cmd = 0x02;
+											} else if (cmdcompare(ptr, "BRIGHT") == 0 || cmdcompare(ptr, "+") == 0 ) {
+												cmd = 0x05;
+											} else if (cmdcompare(ptr, "DARK") == 0 || cmdcompare(ptr, "-") == 0 ) {
+												cmd = 0x06;
+											}
+											/* dimming case */
+											else {
+												errno = 0;
+												maincmd = 0x05;
+												int dim_value = strtol(ptr, NULL, 10);
+												if( *(ptr+strlen(ptr)-1)=='\%' ) {
+													dim_value = (248 * dim_value) / 100;
+												}
+												if (errno != 0 || dim_value < 0 || dim_value > 248) {
+													cmd = -2;
+													errormsg = seterror("Wrong dim level (must be within 0-248 or 0\%-100\%)");
+													fcmdok = false;
+												}
+												else {
+													cmd = 0x01 * dim_value;
+												}
+											}
+											if (cmd >= 0) {
+												usbcmd[0] = 0x05;
+												usbcmd[1] = code * 0x10 + (addr - 1);
+												usbcmd[2] = cmd;
+												usbcmd[3] = maincmd;
+												usbcmd[4] = learn; // 0x01 flag for code learning devices, 0x00 flag for standard devices (DIP-switches) */
+												if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
+													errormsg = seterror("USB communication error");
+													fcmdok = false;
+												}
+											}
+											else {
+												errormsg = seterror("wrong <cmd> parameter '%s'", ptr);
+												fcmdok = false;
+											}
+										}
+										else {
+											errormsg = seterror("missing <cmd> parameter");
+											fcmdok = false;
+										}
+									}
+									else {
+										errormsg = seterror("missing <learn> parameter");
+										fcmdok = false;
+									}
+								}
 							else {
 								errormsg = seterror("%s: <addr> parameter out of range (must be within 1 to 16)", ptr);
 								fcmdok = false;
@@ -1310,7 +1457,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 					errormsg = seterror("missing <code> parameter");
 					fcmdok = false;
 				}
-		 	}
+			}
 		 	/* Scene commands */
 			else if (cmdcompare(ptr, "SCENE") == 0) {
 				long int scene;
@@ -1450,7 +1597,7 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 										}
 									}
 									else {
-										errormsg = seterror("wrong paramater, use time format 'MMDDhhmm[[CC]YY][.ss]' or keyword 'AUTO'");
+										errormsg = seterror("wrong parameter, use time format 'MMDDhhmm[[CC]YY][.ss]' or keyword 'AUTO'");
 										fcmdok = false;
 									}
 									break;
@@ -1472,12 +1619,12 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 				 				housecode = newhc;
 				 			}
 				 			else {
-				 				errormsg = seterror("wrong paramater '%s'", ptr);
+				 				errormsg = seterror("wrong parameter '%s'", ptr);
 				 				fcmdok = false;
 				 			}
 						}
 						else {
-							errormsg = seterror("missing paramater");
+							errormsg = seterror("missing parameter");
 							fcmdok = false;
 						}
 					}
@@ -1698,7 +1845,7 @@ void copyright(void)
 			"There is NO WARRANTY, to the extent permitted by law.\n"
 			"\n"
 			"written by zwiebelchen <lars.cebu@gmail.com>\n"
-			"modified by Norbert Richter <mail@norbert-richter.info>\n"
+			"modified by Norbert Richter <mail@norbert-richter.info>, neckerich <neckerich@gmail.com\n"
 			"\n");
 }
 
@@ -1751,7 +1898,7 @@ int main(int argc, char * argv[]) {
 				break;
 			case 'a':
 				s_addr = inet_addr(optarg);
-				debug(LOG_DEBUG, "Listen on addreess %s", optarg);
+				debug(LOG_DEBUG, "Listen on address %s", optarg);
 				break;
 			case 'c':
 				if( fDaemon ) {
