@@ -4,7 +4,8 @@
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
                neckerich <neckerich@gmail.com>
- Version     : 2.03.0026
+			   AvanOsch <AvanOsch@gmail.com>
+ Version     : 2.03.0028
  Copyright   : GPL
  Description : Access and control your jbmedia Light Manager Pro(+) from Linux
                based on source from light-manager-c written by original author
@@ -112,6 +113,9 @@
 			- fix compiler warnings
 			- fix InterTechno dim value (issue #7)
 
+	2.03.0028
+			+ Added HTTP header Access-Control-Allow-Origin to prevent CORS errors
+
 */
 
 // prevent warnings for 'strptime'
@@ -143,7 +147,7 @@
 
 /* Program name and version */
 #define VERSION				"2.3"
-#define BUILD				"0027"
+#define BUILD				"0028"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -362,7 +366,7 @@ char *str_replace ( const char *string, const char *substr, const char *replacem
 
 
 /** * C++ version 0.4 char* style "itoa":
-	* Written by Lukás Chmela
+	* Written by Lukï¿½s Chmela
 	* Released under GPLv3.
 	*/
 char * itoa(int value, char* result, int base)
@@ -992,6 +996,7 @@ void request_header(int socket_handle, int response, const char *responsetext)
 		"Pragma: no-cache\r\n"
 		"Connection: close\r\n"
 		"Content-Type: text/html\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
 		"\r\n"
 		,response, responsetext
 		,buffer
