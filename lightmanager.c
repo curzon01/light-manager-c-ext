@@ -4,7 +4,8 @@
  Author      : zwiebelchen <lars.cebu@gmail.com>
  Modified    : Norbert Richter <mail@norbert-richter.info>
                neckerich <neckerich@gmail.com>
- Version     : 2.03.0026
+               AvanOsch <AvanOsch@gmail.com>
+ Version     : 2.03.0028
  Copyright   : GPL
  Description : Access and control your jbmedia Light Manager Pro(+) from Linux
                based on source from light-manager-c written by original author
@@ -112,6 +113,14 @@
 			- fix compiler warnings
 			- fix InterTechno dim value (issue #7)
 
+	2.03.0028
+			+ Added HTTP header Access-Control-Allow-Origin to prevent CORS errors
+			- Replaced changes in 2.03.0027 with those made by "Neuroplant", as they broke (my?) InterTechno dimmer commands
+			  - Those changes also caused command error detection to fail somewhat
+			  - Neuroplant's GitHub fork: https://github.com/Neuroplant/light-manager-c-ext
+			- IKEA devices needed an extra (useless) <cmd> to trigger dimmer percentage
+			- Change IKEA devices dimmer range to 0%-100%
+
 */
 
 // prevent warnings for 'strptime'
@@ -143,7 +152,7 @@
 
 /* Program name and version */
 #define VERSION				"2.3"
-#define BUILD				"0027"
+#define BUILD				"0028"
 #define PROGNAME			"Linux Lightmanager"
 
 /* Some macros */
@@ -362,7 +371,7 @@ char *str_replace ( const char *string, const char *substr, const char *replacem
 
 
 /** * C++ version 0.4 char* style "itoa":
-	* Written by Luk·s Chmela
+	* Written by Luk√°s Chmela
 	* Released under GPLv3.
 	*/
 char * itoa(int value, char* result, int base)
@@ -992,6 +1001,7 @@ void request_header(int socket_handle, int response, const char *responsetext)
 		"Pragma: no-cache\r\n"
 		"Connection: close\r\n"
 		"Content-Type: text/html\r\n"
+		"Access-Control-Allow-Origin: *\r\n"
 		"\r\n"
 		,response, responsetext
 		,buffer
@@ -1302,17 +1312,16 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 										cmd = 0x10; // command for fast dimming mode (instant dimming)
 									}
 									/* dimming case */
-									/* next token: dimming value */ // dim level 0-90% in steps of 10%
-									ptr = strtok(NULL, tok_delimiter);
-									if( ptr!=NULL ) {
+									else {
 										errno = 0;
 										int dim_value = strtol(ptr, NULL, 10);
 											if( *(ptr+strlen(ptr)-1)=='\%' ) {
-												dim_value = (10 * dim_value) / 100;
+												/* dimming value - dim level 0-90% in steps of 10% */
+												dim_value = (9 * dim_value) / 100;
 											}
 											if (errno != 0 || dim_value < 0 || dim_value > 9) { //if (errno != 0 || dim_value < 0 || dim_value > 10) {
 													cmd = -2;
-													errormsg = seterror("Wrong dim level (must be within 0-90\%)");
+													errormsg = seterror("Wrong dim level (must be within 0-100\%)");
 													fcmdok = false;
 											}
 											if (dim_value == 9) { // ON = Level 9 or 90% 
@@ -1389,71 +1398,76 @@ int handle_input(char* input, libusb_device_handle* dev_handle, int socket_handl
 										learn = 0x01;
 									} else if (cmdcompare(ptr, "DIP") == 0 ) {
 										learn = 0x00;
+									} else {
+										errormsg = seterror("Wrong <learn> parameter");
+										fcmdok = false;
 									}
-										/* next token: cmd */
-										ptr = strtok(NULL, tok_delimiter);
-										if( ptr!=NULL ) {
-											int maincmd = 0x06; /*	0x06 default for all commands except dim
-																	0x05 for dim, then cmd is the dim level (0-250) */
-											if (cmdcompare(ptr, "ON") == 0 || cmdcompare(ptr, "UP") == 0  || cmdcompare(ptr, "OPEN") == 0) {
-												cmd = 0x01;
-											} else if (cmdcompare(ptr, "OFF") == 0 || cmdcompare(ptr, "DOWN") == 0  || cmdcompare(ptr, "CLOSE") == 0) {
-												cmd = 0x00;
-											} else if (cmdcompare(ptr, "TOGGLE") == 0 ) {
-												cmd = 0x02;
-											} else if (cmdcompare(ptr, "BRIGHT") == 0 || cmdcompare(ptr, "+") == 0 ) {
-												cmd = 0x05;
-											} else if (cmdcompare(ptr, "DARK") == 0 || cmdcompare(ptr, "-") == 0 ) {
-												cmd = 0x06;
+									/* next token: cmd */
+									ptr = strtok(NULL, tok_delimiter);
+									if( ptr!=NULL ) {
+										int maincmd = 0x06; /*	0x06 default for all commands except dim
+																0x05 for dim, then cmd is the dim level (0-250) */
+										if (cmdcompare(ptr, "ON") == 0 || cmdcompare(ptr, "UP") == 0  || cmdcompare(ptr, "OPEN") == 0) {
+											cmd = 0x01;
+										} else if (cmdcompare(ptr, "OFF") == 0 || cmdcompare(ptr, "DOWN") == 0  || cmdcompare(ptr, "CLOSE") == 0) {
+											cmd = 0x00;
+										} else if (cmdcompare(ptr, "TOGGLE") == 0 ) {
+											cmd = 0x02;
+										} else if (cmdcompare(ptr, "BRIGHT") == 0 || cmdcompare(ptr, "+") == 0 ) {
+											cmd = 0x05;
+										} else if (cmdcompare(ptr, "DARK") == 0 || cmdcompare(ptr, "-") == 0 ) {
+											cmd = 0x06;
+										}
+										/* dimming case */
+										else {
+											errno = 0;
+											maincmd = 0x05;
+											int dim_value = strtol(ptr, NULL, 10);
+											if( *(ptr+strlen(ptr)-1)=='\%' ) {
+												dim_value = (248 * dim_value) / 100;
 											}
-											/* dimming case */
-											else {
-												errno = 0;
-												maincmd = 0x05;
-												int dim_value = strtol(ptr, NULL, 10);
-												/* dim value are the 4 msb, dim command has also bit 3 set (0x08)
-												 * dim cmd is build on binary 
-												 * xxxx1000 where xxxx are the dimming value 0-15
-												 */
-												if( *(ptr+strlen(ptr)-1)=='\%' ) {
-													dim_value = (248 * dim_value) / 100;
-													cmd = (( ((15 * dim_value) / 100) & 0x0f)<<4) | 0x08;
-												}
-												if (errno != 0 || dim_value < 0 || dim_value > 15) {
-													cmd = -2;
-													errormsg = seterror("Wrong dim level (must be within 0-15 or 0\%-100\%)");
-													fcmdok = false;
-												}
-												else {
-													cmd = ((dim_value & 0x0f)<<4) | 0x08;
-												}
-											}
-											if (cmd >= 0) {
-												usbcmd[0] = 0x05;
-												usbcmd[1] = code * 0x10 + (addr - 1);
-												usbcmd[2] = cmd;
-												usbcmd[3] = maincmd;
-												usbcmd[4] = learn; // 0x01 flag for code learning devices, 0x00 flag for standard devices (DIP-switches) */
-												if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
-													errormsg = seterror("USB communication error");
-													fcmdok = false;
-												}
+											if (errno != 0 || dim_value < 0 || dim_value > 248) {
+												cmd = -2;
+												errormsg = seterror("Wrong dim level (must be within 0-248 or 0\%-100\%)");
+												fcmdok = false;
 											}
 											else {
-												errormsg = seterror("wrong <cmd> parameter '%s'", ptr);
+												cmd = 0x01 * dim_value;
+												if (dim_value != 0) {
+													dim_value = ((dim_value / 16)* 16 + 8);
+												}
+												if (dim_value > 248) {
+													dim_value = 248;
+												}
+												cmd = 0x01 * dim_value;
+											}
+										}
+										if (cmd >= 0) {
+											usbcmd[0] = 0x05;
+											usbcmd[1] = code * 0x10 + (addr - 1);
+											usbcmd[2] = cmd;
+											usbcmd[3] = maincmd;
+											usbcmd[4] = learn; // 0x01 flag for code learning devices, 0x00 flag for standard devices (DIP-switches) */
+											if( usb_send(dev_handle, (unsigned char *)usbcmd, false) != EXIT_SUCCESS ) {
+												errormsg = seterror("USB communication error");
 												fcmdok = false;
 											}
 										}
 										else {
-											errormsg = seterror("missing <cmd> parameter");
+											errormsg = seterror("wrong <cmd> parameter '%s'", ptr);
 											fcmdok = false;
 										}
 									}
 									else {
-										errormsg = seterror("missing <learn> parameter");
+										errormsg = seterror("missing <cmd> parameter");
 										fcmdok = false;
 									}
 								}
+								else {
+									errormsg = seterror("missing <learn> parameter");
+									fcmdok = false;
+								}
+							}
 							else {
 								errormsg = seterror("%s: <addr> parameter out of range (must be within 1 to 16)", ptr);
 								fcmdok = false;
